@@ -378,14 +378,14 @@ Flow.ornamentCodes.ornaments = {
   'turn': { code: 'v72', smuflGlyph: '\uE567', smuflYOffset: -0.28 },
   'turn_inverted': { code: 'v33', smuflGlyph: '\uE569', smuflYOffset: -0.26 },
   'tr': { code: 'v1f', smuflGlyph: '\uE566', smuflYOffset: -0.22 },
-  'upprall': { code: 'v60', smuflGlyph: '\uE5B5', smuflYOffset: -0.18 },
-  'downprall': { code: 'vb4', smuflGlyph: '\uE5C3', smuflYOffset: -0.18 },
-  'prallup': { code: 'v6d', smuflGlyph: '\uE5BB', smuflYOffset: -0.2 },
-  'pralldown': { code: 'v2c', smuflGlyph: '\uE5C8', smuflYOffset: -0.2 },
-  'upmordent': { code: 'v29', smuflGlyph: '\uE5B8', smuflYOffset: -0.18 },
-  'downmordent': { code: 'v68', smuflGlyph: '\uE5C4', smuflYOffset: -0.18 },
-  'lineprall': { code: 'v20', smuflGlyph: '\uE5B2', smuflYOffset: -0.18 },
-  'prallprall': { code: 'v86', smuflGlyph: '\uE56E', smuflYOffset: -0.14 },
+  'upprall': { code: 'v60', smuflGlyph: '\uE5B5', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'downprall': { code: 'vb4', smuflGlyph: '\uE5C3', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'prallup': { code: 'v6d', smuflGlyph: '\uE5BB', smuflYOffset: -0.2, smuflScale: 0.74 },
+  'pralldown': { code: 'v2c', smuflGlyph: '\uE5C8', smuflYOffset: -0.2, smuflScale: 0.74 },
+  'upmordent': { code: 'v29', smuflGlyph: '\uE5B8', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'downmordent': { code: 'v68', smuflGlyph: '\uE5C4', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'lineprall': { code: 'v20', smuflGlyph: '\uE5B2', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'prallprall': { code: 'v86', smuflGlyph: '\uE56E', smuflYOffset: -0.14, smuflScale: 0.74 },
 };
 
 Flow.keySignature = spec => {

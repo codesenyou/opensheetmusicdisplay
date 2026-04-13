@@ -1445,7 +1445,7 @@ export class VexFlowMusicSheetCalculator extends MusicSheetCalculator {
     let trillEndX: number = 0;
     let trillSkyline: number = Infinity;
     let trillWavyLineBottom: number = Infinity;
-    const TRILL_HEIGHT: number = 1.85;
+    const TRILL_HEIGHT: number = 1.5;
 
     let startX: number = startVfVoiceEntry.PositionAndShape.AbsolutePosition.x + startVfVoiceEntry.PositionAndShape.BorderLeft;
     if (startVfVoiceEntry.parentVoiceEntry?.OrnamentContainer?.GetOrnament === OrnamentEnum.Trill) {
@@ -2189,4 +2189,3 @@ export class VexFlowMusicSheetCalculator extends MusicSheetCalculator {
     }
   }
 }
-
