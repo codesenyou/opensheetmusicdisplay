@@ -444,9 +444,9 @@ export class ArticulationReader {
   private vexflowOrnamentFor(ornament: OrnamentEnum): string {
     switch (ornament) {
       case OrnamentEnum.LongMordent:
-        return "lineprall";
+        return "prallmordent";
       case OrnamentEnum.LongInvertedMordent:
-        return "prallprall";
+        return "tremblement";
       case OrnamentEnum.UpPrall:
         return "upprall";
       case OrnamentEnum.DownPrall:
