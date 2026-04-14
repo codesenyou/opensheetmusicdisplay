@@ -384,9 +384,9 @@ Flow.ornamentCodes.ornaments = {
   'downprall': { code: 'vb4', smuflGlyph: '\uE5C3', smuflYOffset: -0.18, smuflScale: 0.74 },
   'prallup': { code: 'v6d', smuflGlyph: '\uE5BB', smuflYOffset: -0.2, smuflScale: 0.74 },
   'pralldown': { code: 'v2c', smuflGlyph: '\uE5C8', smuflYOffset: -0.2, smuflScale: 0.74 },
-  'upmordent': { code: 'v29', smuflGlyph: '\uE5C6', smuflYOffset: -0.18, smuflScale: 0.74 },
-  'downmordent': { code: 'v68', smuflGlyph: '\uE5C7', smuflYOffset: -0.18, smuflScale: 0.74 },
-  'lineprall': { code: 'v20', smuflGlyph: '\uE5B2', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'upmordent': { code: 'v29', smuflGlyph: '\uE5B8', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'downmordent': { code: 'v68', smuflGlyph: '\uE5C4', smuflYOffset: -0.18, smuflScale: 0.74 },
+  'lineprall': { code: 'v20' },
   'prallprall': { code: 'v86', smuflGlyph: '\uE56E', smuflYOffset: -0.14, smuflScale: 0.74 },
 };
 
