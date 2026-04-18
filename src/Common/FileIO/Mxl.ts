@@ -53,28 +53,80 @@ export class MXLHelper {
     }
 
     public static async jszipToXMLstring(zip: JSZip): Promise<string> {
-        // asynchronously load zip file and process it - with Promises
-        let container: string = await zip.file("META-INF/container.xml").async("text");
-        if (!container.startsWith("<")) {
-            const uint8Array: Uint8Array = await zip.file("META-INF/container.xml").async("uint8array");
-            container = new TextDecoder("utf-8").decode(uint8Array);
-        }
-        if (!container.startsWith("<")) {
-            // assume UTF-16
-            const uint8Array: Uint8Array = await zip.file("META-INF/container.xml").async("uint8array");
-            container = new TextDecoder("utf-16").decode(uint8Array);
-        }
-        const parser: DOMParser = new DOMParser();
-        const doc: Document = parser.parseFromString(container, "text/xml");
-        const rootFile: string = doc.getElementsByTagName("rootfile")[0].getAttribute("full-path");
-        const xmlText: string = await zip.file(rootFile).async("text");
+        const entryNames: string[] = Object.keys(zip.files).filter((path: string) => !zip.files[path].dir);
+        const candidatePaths: string[] = [];
+        const pushCandidate: (path: string) => void = (path: string): void => {
+            if (path && zip.file(path) && !candidatePaths.includes(path)) {
+                candidatePaths.push(path);
+            }
+        };
 
-        if (!xmlText.substring(0, 1).startsWith("<")) {
-            // assume UTF-16
-            const uint8Array: Uint8Array = await zip.file(rootFile).async("uint8array");
-            return new TextDecoder("utf-16").decode(uint8Array);
+        const containerPath: string = "META-INF/container.xml";
+        if (zip.file(containerPath)) {
+            const container: string = await this.readXmlTextFromZipPath(zip, containerPath);
+            const parser: DOMParser = new DOMParser();
+            const doc: Document = parser.parseFromString(container, "text/xml");
+            const rootFiles: HTMLCollectionOf<Element> = doc.getElementsByTagName("rootfile");
+            for (let i: number = 0; i < rootFiles.length; i += 1) {
+                const rootFile: string = rootFiles[i].getAttribute("full-path");
+                pushCandidate(rootFile);
+            }
+        }
+
+        const extensionsInPriority: RegExp[] = [/\.musicxml$/i, /\.xml$/i, /\.mscx$/i];
+        for (const extension of extensionsInPriority) {
+            for (const path of entryNames) {
+                if (extension.test(path)) {
+                    pushCandidate(path);
+                }
+            }
+        }
+
+        let foundMuseScoreMscx: boolean = false;
+        for (const candidatePath of candidatePaths) {
+            const xmlText: string = await this.readXmlTextFromZipPath(zip, candidatePath);
+            if (this.isScorePartwiseXml(xmlText)) {
+                return xmlText;
+            }
+            if (candidatePath.toLowerCase().endsWith(".mscx")) {
+                foundMuseScoreMscx = true;
+            }
+        }
+
+        if (foundMuseScoreMscx) {
+            throw new Error("Archive contains a MuseScore .mscx score, but no MusicXML score-partwise file.");
+        }
+        throw new Error("Could not find a MusicXML score-partwise file in archive.");
+    }
+
+    private static async readXmlTextFromZipPath(zip: JSZip, filePath: string): Promise<string> {
+        const zipObject: JSZip.JSZipObject = zip.file(filePath);
+        if (!zipObject) {
+            throw new Error("Could not read archive entry: " + filePath);
+        }
+        let xmlText: string = await zipObject.async("text");
+        if (!this.startsWithXmlTag(xmlText)) {
+            const uint8Array: Uint8Array = await zipObject.async("uint8array");
+            xmlText = new TextDecoder("utf-8").decode(uint8Array);
+        }
+        if (!this.startsWithXmlTag(xmlText)) {
+            const uint8Array: Uint8Array = await zipObject.async("uint8array");
+            xmlText = new TextDecoder("utf-16").decode(uint8Array);
         }
         return xmlText;
+    }
+
+    private static startsWithXmlTag(content: string): boolean {
+        return /^\s*</.test(content);
+    }
+
+    private static isScorePartwiseXml(xmlText: string): boolean {
+        if (!this.startsWithXmlTag(xmlText)) {
+            return false;
+        }
+        const parser: DOMParser = new DOMParser();
+        const xml: Document = parser.parseFromString(xmlText, "text/xml");
+        return xml.documentElement?.nodeName?.toLowerCase() === "score-partwise";
     }
 
     public static MXLtoXMLstring(data: string | Blob): Promise<string> {

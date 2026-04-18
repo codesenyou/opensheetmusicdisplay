@@ -2,6 +2,7 @@
 import { IXmlElement } from "../../../src/Common/FileIO/Xml";
 import { TestUtils } from "../../Util/TestUtils";
 import { MXLHelper } from "../../../src/Common/FileIO/Mxl";
+import JSZip from "jszip";
 
 describe("MXL Tests", () => {
   // Generates a test for a mxl file name
@@ -45,5 +46,34 @@ describe("MXL Tests", () => {
       },
       (exc: any) => { done(); }
     );
+  });
+
+  it("reads archive without container.xml when it contains MusicXML", (done: Mocha.Done) => {
+    const zip: JSZip = new JSZip();
+    zip.file("metadata/info.mscx", "<museScore version=\"4.0\"></museScore>");
+    zip.file("score.musicxml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><score-partwise version=\"4.0\"></score-partwise>");
+    zip.generateAsync({type: "string"}).then((archive: string) => {
+      MXLHelper.MXLtoIXmlElement(archive).then(
+        (score: IXmlElement) => {
+          chai.expect(score).to.not.be.undefined;
+          chai.expect(score.name).to.equal("score-partwise");
+          done();
+        },
+        (exc: any) => { throw exc; }
+      ).then(undefined, done);
+    });
+  });
+
+  it("fails when archive only contains MuseScore .mscx", (done: Mocha.Done) => {
+    const zip: JSZip = new JSZip();
+    zip.file("score.mscx", "<museScore version=\"4.0\"></museScore>");
+    zip.generateAsync({type: "string"}).then((archive: string) => {
+      MXLHelper.MXLtoIXmlElement(archive).then(
+        (_score: IXmlElement) => {
+          done(new Error("Expected .mscx-only archive to fail, but it loaded."));
+        },
+        (_exc: any) => { done(); }
+      );
+    });
   });
 });
