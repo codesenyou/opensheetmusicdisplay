@@ -6,6 +6,20 @@ import tseslint from "typescript-eslint";
 import stylistic from "@stylistic/eslint-plugin";
 import jsdoc from "eslint-plugin-jsdoc";
 
+/**
+ * Work around malformed global names from upstream packages
+ * (e.g. "AudioWorkletGlobalScope " with trailing whitespace).
+ */
+const sanitizeGlobals = (globalsMap) => {
+    return Object.fromEntries(
+        Object.entries(globalsMap).map(([key, value]) => [key.trim(), value]),
+    );
+};
+
+const mergedGlobals = (...globalsMaps) => {
+    return Object.assign({}, ...globalsMaps.map((globalsMap) => sanitizeGlobals(globalsMap)));
+};
+
 export default defineConfig(
     {
         ignores: ["webpack*.js", "karma.conf.js", "src/VexFlowPatch/", "build/", "**/*.d.ts", "demo/", ".karma_temp/", "export/"],
@@ -15,10 +29,7 @@ export default defineConfig(
     {
         files: ["**/*.ts"],
         languageOptions: {
-            globals: {
-                ...globals.browser,
-                ...globals.node,
-            },
+            globals: mergedGlobals(globals.browser, globals.node),
             parserOptions: {
                 projectService: true,
                 tsconfigRootDir: import.meta.dirname,
@@ -171,21 +182,16 @@ export default defineConfig(
     {
         files: ["test/**/*.ts"],
         languageOptions: {
-            globals: {
-                ...globals.mocha,
+            globals: mergedGlobals(globals.mocha, {
                 chai: "readonly",
                 Mocha: "readonly",
-            },
+            }),
         },
     },
     {
         files: ["test/Util/*.js", "test/Util/*.mjs"],
         languageOptions: {
-            globals: {
-                ...globals.browser,
-                ...globals.node,
-                ...globals.mocha,
-            },
+            globals: mergedGlobals(globals.browser, globals.node, globals.mocha),
         },
         rules: {
             "@typescript-eslint/explicit-function-return-type": "off",
