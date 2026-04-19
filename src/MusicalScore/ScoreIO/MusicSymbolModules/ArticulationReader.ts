@@ -287,10 +287,20 @@ export class ArticulationReader {
         "downmordent": OrnamentEnum.DownMordent,
         "down-prall": OrnamentEnum.DownPrall,
         "downprall": OrnamentEnum.DownPrall,
+        "invertedturn": OrnamentEnum.InvertedTurn,
         "lineprall": OrnamentEnum.LinePrall,
+        "invertedmordent": OrnamentEnum.InvertedMordent,
+        "longinvertedmordent": OrnamentEnum.LongInvertedMordent,
+        "longmordent": OrnamentEnum.LongMordent,
+        "mordent": OrnamentEnum.Mordent,
         "pralldown": OrnamentEnum.PrallDown,
+        "prallmordent": OrnamentEnum.LongMordent,
         "prallprall": OrnamentEnum.PrallPrall,
         "prallup": OrnamentEnum.PrallUp,
+        "shorttrill": OrnamentEnum.Trill,
+        "tremblement": OrnamentEnum.LongInvertedMordent,
+        "trill": OrnamentEnum.Trill,
+        "turn": OrnamentEnum.Turn,
         "upmordent": OrnamentEnum.UpMordent,
         "up-prall": OrnamentEnum.UpPrall,
         "upprall": OrnamentEnum.UpPrall,
@@ -322,20 +332,40 @@ export class ArticulationReader {
       }
       if (!ornament) {
         for (const otherOrnamentNode of ornamentsNode.elements("other-ornament")) {
-          const normalizedValue: string = otherOrnamentNode.value?.toLowerCase().replace(/[\s_-]+/g, "");
-          if (!normalizedValue) {
-            continue;
+          const candidateTokens: string[] = [];
+          const textValue: string = otherOrnamentNode.value;
+          if (textValue) {
+            candidateTokens.push(textValue);
           }
-          const ornamentType: OrnamentEnum = otherOrnamentAliases[normalizedValue];
-          if (ornamentType === undefined) {
-            continue;
+          const smuflAttribute: Attr = otherOrnamentNode.attribute("smufl");
+          if (smuflAttribute?.value) {
+            candidateTokens.push(smuflAttribute.value);
           }
-          ornament = new OrnamentContainer(ornamentType);
-          const placementAttr: Attr = otherOrnamentNode.attribute("placement");
-          if (placementAttr?.value === "below") {
-            ornament.placement = PlacementEnum.Below;
+
+          for (const token of candidateTokens) {
+            const normalizedValue: string = token.toLowerCase().replace(/[\s_.-]+/g, "");
+            if (!normalizedValue) {
+              continue;
+            }
+
+            let ornamentType: OrnamentEnum = otherOrnamentAliases[normalizedValue];
+            if (ornamentType === undefined && normalizedValue.startsWith("ornament")) {
+              ornamentType = otherOrnamentAliases[normalizedValue.substring("ornament".length)];
+            }
+            if (ornamentType === undefined) {
+              continue;
+            }
+
+            ornament = new OrnamentContainer(ornamentType);
+            const placementAttr: Attr = otherOrnamentNode.attribute("placement");
+            if (placementAttr?.value === "below") {
+              ornament.placement = PlacementEnum.Below;
+            }
+            break;
           }
-          break;
+          if (ornament) {
+            break;
+          }
         }
       }
       if (ornament) {

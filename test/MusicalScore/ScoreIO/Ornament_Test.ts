@@ -35,6 +35,42 @@ describe("MusicXML parser for ornaments", () => {
     done();
   });
 
+  it("maps MuseScore prallmordent alias", (done: Mocha.Done) => {
+    const voiceEntry: any = getMusicSheetWithOtherOrnament("prallmordent")
+      .SourceMeasures[0].VerticalSourceStaffEntryContainers[0].StaffEntries[0].VoiceEntries[0];
+
+    chai.assert.isDefined(voiceEntry.OrnamentContainer);
+    chai.expect(voiceEntry.OrnamentContainer.GetOrnament).to.equal(OrnamentEnum.LongMordent);
+    done();
+  });
+
+  it("maps MuseScore tremblement alias", (done: Mocha.Done) => {
+    const voiceEntry: any = getMusicSheetWithOtherOrnament("tremblement")
+      .SourceMeasures[0].VerticalSourceStaffEntryContainers[0].StaffEntries[0].VoiceEntries[0];
+
+    chai.assert.isDefined(voiceEntry.OrnamentContainer);
+    chai.expect(voiceEntry.OrnamentContainer.GetOrnament).to.equal(OrnamentEnum.LongInvertedMordent);
+    done();
+  });
+
+  it("maps SMuFL other-ornament attribute for turn", (done: Mocha.Done) => {
+    const voiceEntry: any = getMusicSheetWithOtherOrnamentMarkup("<other-ornament smufl=\"ornamentTurn\"/>")
+      .SourceMeasures[0].VerticalSourceStaffEntryContainers[0].StaffEntries[0].VoiceEntries[0];
+
+    chai.assert.isDefined(voiceEntry.OrnamentContainer);
+    chai.expect(voiceEntry.OrnamentContainer.GetOrnament).to.equal(OrnamentEnum.Turn);
+    done();
+  });
+
+  it("maps SMuFL other-ornament attribute for mordent", (done: Mocha.Done) => {
+    const voiceEntry: any = getMusicSheetWithOtherOrnamentMarkup("<other-ornament smufl=\"ornamentMordent\"/>")
+      .SourceMeasures[0].VerticalSourceStaffEntryContainers[0].StaffEntries[0].VoiceEntries[0];
+
+    chai.assert.isDefined(voiceEntry.OrnamentContainer);
+    chai.expect(voiceEntry.OrnamentContainer.GetOrnament).to.equal(OrnamentEnum.Mordent);
+    done();
+  });
+
   const musicXmlOrnamentExpectations: Array<[string, OrnamentEnum]> = [
     ["<trill-mark/>", OrnamentEnum.Trill],
     ["<trill-mark/><wavy-line type=\"start\" number=\"1\"/>", OrnamentEnum.LongTrill],
@@ -98,6 +134,14 @@ function getMusicSheetWithOtherOrnament(ornamentName: string): MusicSheet {
   const score: IXmlElement = new IXmlElement(doc.getElementsByTagName("score-partwise")[0]);
   chai.assert.isDefined(score);
   return reader.createMusicSheet(score, "ornament-template.xml");
+}
+
+function getMusicSheetWithOtherOrnamentMarkup(ornamentMarkup: string): MusicSheet {
+  const doc: Document = parser.parseFromString(getMusicXmlWithOrnamentMarkup(ornamentMarkup), "text/xml");
+  chai.assert.isDefined(doc);
+  const score: IXmlElement = new IXmlElement(doc.getElementsByTagName("score-partwise")[0]);
+  chai.assert.isDefined(score);
+  return reader.createMusicSheet(score, "ornament-template-smufl.xml");
 }
 
 function getMusicSheetWithXmlOrnament(ornamentXml: string): MusicSheet {
