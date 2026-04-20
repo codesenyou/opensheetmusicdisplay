@@ -35,6 +35,8 @@ import { Instrument } from "../Instrument";
 
 export class VoiceGenerator {
   private static readonly pendingTieStopsByStaff: WeakMap<Staff, PendingTieStop[]> = new WeakMap<Staff, PendingTieStop[]>();
+  /** Parse-time note order cache used while measure numbers/absolute timestamps are still unset. */
+  private static readonly noteOrderValueByNote: WeakMap<Note, number> = new WeakMap<Note, number>();
 
   constructor(pluginManager: ReaderPluginManager, staff: Staff, voiceId: number, slurReader: SlurReader, mainVoice: Voice = undefined) {
     this.staff = staff;
@@ -131,6 +133,7 @@ export class VoiceGenerator {
         : this.addSingleNote(noteNode, noteDuration, noteTypeXml, typeDuration, normalNotes, chord, octavePlusOne,
                              printObject, isCueNote, isGraceNote, stemDirectionXml, tremoloInfo, stemColorXml, noteheadColorXml);
       this.currentNote.DotsXml = dotsXml;
+      this.cacheCurrentNoteOrderValue(measureStartAbsoluteTimestamp);
       // read lyrics
       const lyricElements: IXmlElement[] = noteNode.elements("lyric");
       if (this.lyricsReader !== undefined && lyricElements) {
@@ -1164,6 +1167,7 @@ export class VoiceGenerator {
       key: number;
       exactTieNumber: boolean;
       sameVoice: boolean;
+      sameMeasure: boolean;
       sameStaff: boolean;
       sameAccidental: boolean;
       delta: number | undefined;
@@ -1190,7 +1194,11 @@ export class VoiceGenerator {
         }
         const tieVoiceId: number | undefined = referenceNote?.ParentVoiceEntry?.ParentVoice?.VoiceId;
         const tieStaffId: number | undefined = referenceNote?.ParentStaffEntry?.ParentStaff?.Id;
+        // Prefer same-voice ties, but keep cross-voice fallback for unnumbered ties.
         const sameVoice: boolean = candidateVoiceId !== undefined && tieVoiceId === candidateVoiceId;
+        const sameMeasure: boolean = candidateNote?.SourceMeasure !== undefined
+          && referenceNote?.SourceMeasure !== undefined
+          && candidateNote.SourceMeasure === referenceNote.SourceMeasure;
         const sameStaff: boolean = candidateStaffId !== undefined && tieStaffId === candidateStaffId;
         const sameAccidental: boolean = tieReferencePitch?.Accidental === candidateNote.Pitch?.Accidental;
         const tieStartOrderValue: number | undefined = this.getSafeNoteOrderValue(referenceNote);
@@ -1199,11 +1207,17 @@ export class VoiceGenerator {
         if (Number.isFinite(candidateOrderValue) && Number.isFinite(tieStartOrderValue)) {
           delta = candidateOrderValue - tieStartOrderValue;
           isPastOrEqual = delta >= -Fraction.FloatInaccuracyTolerance;
+          if (!isPastOrEqual) {
+            // Don't allow matching a tie stop to a start note that is later in score time.
+            // This can happen when MusicXML ordering uses backup/forward across voices.
+            continue;
+          }
         }
         matchedCandidates.push({
           key: parseInt(key, 10),
           exactTieNumber: requestedTieNumber !== undefined && tie.TieNumber === requestedTieNumber,
           sameVoice: sameVoice,
+          sameMeasure: sameMeasure,
           sameStaff: sameStaff,
           sameAccidental: sameAccidental,
           delta: delta,
@@ -1231,6 +1245,9 @@ export class VoiceGenerator {
       if (a.sameVoice !== b.sameVoice) {
         return a.sameVoice ? -1 : 1;
       }
+      if (a.sameMeasure !== b.sameMeasure) {
+        return a.sameMeasure ? -1 : 1;
+      }
       if (a.sameStaff !== b.sameStaff) {
         return a.sameStaff ? -1 : 1;
       }
@@ -1243,7 +1260,22 @@ export class VoiceGenerator {
     return matchedCandidates[0].key;
   }
 
+  private cacheCurrentNoteOrderValue(measureStartAbsoluteTimestamp: Fraction): void {
+    if (!this.currentNote) {
+      return;
+    }
+    const measureStart: number = measureStartAbsoluteTimestamp?.RealValue;
+    const voiceTimestamp: number = this.currentVoiceEntry?.Timestamp?.RealValue;
+    if (Number.isFinite(measureStart) && Number.isFinite(voiceTimestamp)) {
+      VoiceGenerator.noteOrderValueByNote.set(this.currentNote, measureStart + voiceTimestamp);
+    }
+  }
+
   private getSafeNoteOrderValue(note: Note | undefined): number | undefined {
+    const cachedOrderValue: number = VoiceGenerator.noteOrderValueByNote.get(note);
+    if (Number.isFinite(cachedOrderValue)) {
+      return cachedOrderValue;
+    }
     const absoluteTimestamp: number | undefined = this.getSafeNoteAbsoluteTimestampRealValue(note);
     if (Number.isFinite(absoluteTimestamp)) {
       return absoluteTimestamp;
@@ -1314,6 +1346,7 @@ export class VoiceGenerator {
       }
       const pendingVoiceId: number | undefined = pendingStop.note?.ParentVoiceEntry?.ParentVoice?.VoiceId;
       const pendingStaffId: number | undefined = pendingStop.note?.ParentStaffEntry?.ParentStaff?.Id;
+      // Prefer same-voice ties, but keep cross-voice fallback for unnumbered ties.
       const sameVoice: boolean = candidateVoiceId !== undefined && pendingVoiceId === candidateVoiceId;
       const sameStaff: boolean = candidateStaffId !== undefined && pendingStaffId === candidateStaffId;
       const sameAccidental: boolean = pendingPitch?.Accidental === candidateStartNote.Pitch?.Accidental;
