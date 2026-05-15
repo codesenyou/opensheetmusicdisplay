@@ -218,7 +218,7 @@ export class TemposCalculator implements IAfterSheetReadingModule {
             Inst0.TempoInBpm = ms.DefaultStartTempoInBpm;
         }
         if (Inst0.TempoInBpm === 0.0) {
-            Inst0.TempoInBpm = InstantaneousTempoExpression.getDefaultValueForInstTempo[InstTempo.moderato];
+            Inst0.TempoInBpm = InstantaneousTempoExpression.getDefaultValueForInstTempo(InstTempo.moderato);
         }
         return Inst0.TempoInBpm;
     }

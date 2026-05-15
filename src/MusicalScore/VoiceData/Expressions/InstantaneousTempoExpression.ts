@@ -213,11 +213,11 @@ export class InstantaneousTempoExpression extends AbstractTempoExpression {
     public static getDefaultValueForInstTempo(instTempo: InstTempo): number {
         switch (instTempo) {
             case InstTempo.larghissimo:
-                return 20;
+                return 24;
             case InstTempo.grave:
-                return 30;
+                return 40;
             case InstTempo.lento:
-                return 48;
+                return 52;
             case InstTempo.largo:
                 return 52;
             case InstTempo.larghetto:
@@ -227,29 +227,29 @@ export class InstantaneousTempoExpression extends AbstractTempoExpression {
             case InstTempo.adagietto:
                 return 75;
             case InstTempo.andanteModerato:
-                return 88;
+                return 94;
             case InstTempo.andante:
                 return 92;
             case InstTempo.andantino:
-                return 96;
+                return 94;
             case InstTempo.moderato:
-                return 106;
+                return 114;
             case InstTempo.allegretto:
-                return 112;
+                return 116;
             case InstTempo.allegroModerato:
                 return 118;
             case InstTempo.allegro:
-                return 130;
+                return 144;
             case InstTempo.vivace:
-                return 140;
+                return 166;
             case InstTempo.vivacissimo:
-                return 155;
+                return 174;
             case InstTempo.allegrissimo:
-                return 170;
+                return 174;
             case InstTempo.presto:
                 return 184;
             case InstTempo.prestissimo:
-                return 200;
+                return 208;
             default:
                 return 60;
                 //throw new ArgumentOutOfRangeException("instTempo");
