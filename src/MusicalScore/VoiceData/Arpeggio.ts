@@ -15,6 +15,9 @@ export class Arpeggio {
     public number: string;
 
     public addNote(note: Note): void {
+        if (this.notes.indexOf(note) !== -1) {
+            return;
+        }
         this.notes.push(note);
         note.Arpeggio = this;
     }

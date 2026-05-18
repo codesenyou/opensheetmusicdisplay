@@ -1524,14 +1524,13 @@ export class VexFlowMeasure extends GraphicalMeasure {
     private createArpeggio(voiceEntry: GraphicalVoiceEntry): void {
         if (voiceEntry.parentVoiceEntry && voiceEntry.parentVoiceEntry.Arpeggio) {
             const arpeggio: Arpeggio = voiceEntry.parentVoiceEntry.Arpeggio;
-            // TODO right now our arpeggio object has all arpeggio notes from arpeggios across all voices.
-            // see VoiceGenerator. Doesn't matter for Vexflow for now though
             if (voiceEntry.notes && voiceEntry.notes.length > 0) {
                 const type: VF.Stroke.Type = VexFlowConverter.StrokeTypeFromArpeggioType(arpeggio.type);
                 const stroke: VF.Stroke = new VF.Stroke(type, {
-                    all_voices: this.rules.ArpeggiosGoAcrossVoices
-                    // default: false. This causes arpeggios to always go across all voices, which is often unwanted.
-                    // also, this can cause infinite height of stroke, see #546
+                    all_voices: false
+                    // VexFlow's cross-voice arpeggio span can grow to system height.
+                    // VoiceGenerator assigns the arpeggio to every local voice entry in the same-hand chord,
+                    // so rendering bounded local strokes is safer than using all_voices here.
                 });
                 //if (arpeggio.notes.length === vexFlowVoiceEntry.notes.length) { // different workaround for endless y bug
                 if (this.rules.RenderArpeggios) {

@@ -172,10 +172,10 @@ export class VoiceGenerator {
         const arpeggioNode: IXmlElement = notationNode.element("arpeggiate");
         if (arpeggioNode !== undefined) {
           const arpeggioNumber: string = arpeggioNode.attribute("number")?.value ?? "1";
-          let currentArpeggio: Arpeggio;
-          if (this.currentVoiceEntry.Arpeggio?.number === arpeggioNumber) { // add note to existing Arpeggio
+          let currentArpeggio: Arpeggio = this.getCurrentStaffEntryArpeggio();
+          if (!currentArpeggio && this.currentVoiceEntry.Arpeggio?.number === arpeggioNumber) { // add note to existing Arpeggio
             currentArpeggio = this.currentVoiceEntry.Arpeggio;
-          } else { // create new Arpeggio
+          } else if (!currentArpeggio) { // create new Arpeggio
             let arpeggioAlreadyExists: boolean = false;
             for (const voiceEntry of this.currentStaffEntry.VoiceEntries) {
               if (voiceEntry.Arpeggio?.number === arpeggioNumber) {
@@ -206,6 +206,13 @@ export class VoiceGenerator {
             }
           }
           currentArpeggio.addNote(this.currentNote);
+          this.addCurrentStaffEntryNotesToArpeggio(currentArpeggio);
+        } else {
+          const currentStaffEntryArpeggio: Arpeggio = this.getCurrentStaffEntryArpeggio();
+          if (currentStaffEntryArpeggio) {
+            currentStaffEntryArpeggio.addNote(this.currentNote);
+            this.addCurrentStaffEntryNotesToArpeggio(currentStaffEntryArpeggio);
+          }
         }
         // check for Ties - must be the last check
         const tiedNodeList: IXmlElement[] = notationNode.elements("tied");
@@ -1403,6 +1410,37 @@ export class VoiceGenerator {
       return 0;
     });
     return matches[0].pendingStop;
+  }
+
+  private getCurrentStaffEntryArpeggio(): Arpeggio {
+    if (!this.currentStaffEntry) {
+      return undefined;
+    }
+    for (const voiceEntry of this.currentStaffEntry.VoiceEntries) {
+      if (voiceEntry.Arpeggio) {
+        return voiceEntry.Arpeggio;
+      }
+    }
+    return undefined;
+  }
+
+  private addCurrentStaffEntryNotesToArpeggio(arpeggio: Arpeggio): void {
+    if (!this.currentStaffEntry || !arpeggio) {
+      return;
+    }
+    for (const voiceEntry of this.currentStaffEntry.VoiceEntries) {
+      let voiceEntryHasArpeggioNote: boolean = false;
+      for (const note of voiceEntry.Notes) {
+        if (note.isRest() || !note.Pitch) {
+          continue;
+        }
+        voiceEntryHasArpeggioNote = true;
+        arpeggio.addNote(note);
+      }
+      if (voiceEntryHasArpeggioNote) {
+        voiceEntry.Arpeggio = arpeggio;
+      }
+    }
   }
 
   /**
