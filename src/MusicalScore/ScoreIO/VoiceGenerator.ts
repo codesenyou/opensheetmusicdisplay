@@ -171,21 +171,17 @@ export class VoiceGenerator {
         // check for Arpeggios
         const arpeggioNode: IXmlElement = notationNode.element("arpeggiate");
         if (arpeggioNode !== undefined) {
+          const arpeggioNumber: string = arpeggioNode.attribute("number")?.value ?? "1";
           let currentArpeggio: Arpeggio;
-          if (this.currentVoiceEntry.Arpeggio) { // add note to existing Arpeggio
+          if (this.currentVoiceEntry.Arpeggio?.number === arpeggioNumber) { // add note to existing Arpeggio
             currentArpeggio = this.currentVoiceEntry.Arpeggio;
           } else { // create new Arpeggio
             let arpeggioAlreadyExists: boolean = false;
             for (const voiceEntry of this.currentStaffEntry.VoiceEntries) {
-              if (voiceEntry.Arpeggio) {
+              if (voiceEntry.Arpeggio?.number === arpeggioNumber) {
                 arpeggioAlreadyExists = true;
                 currentArpeggio = voiceEntry.Arpeggio;
-                // TODO handle multiple arpeggios across multiple voices at same timestamp
-
-                // this.currentVoiceEntry.Arpeggio = currentArpeggio; // register the arpeggio in the current voice entry as well?
-                //   but then we duplicate information, and may have to take care not to render it multiple times
-
-                // we already have an arpeggio in another voice, at the current timestamp. add the notes there.
+                // We already have the same numbered arpeggio in another voice at the current timestamp.
                 break;
               }
             }
@@ -205,7 +201,7 @@ export class VoiceGenerator {
                   }
                 }
 
-                currentArpeggio = new Arpeggio(this.currentVoiceEntry, arpeggioType);
+                currentArpeggio = new Arpeggio(this.currentVoiceEntry, arpeggioType, arpeggioNumber);
                 this.currentVoiceEntry.Arpeggio = currentArpeggio;
             }
           }

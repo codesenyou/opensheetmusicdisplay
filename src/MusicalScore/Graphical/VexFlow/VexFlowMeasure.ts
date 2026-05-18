@@ -1526,7 +1526,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
             const arpeggio: Arpeggio = voiceEntry.parentVoiceEntry.Arpeggio;
             // TODO right now our arpeggio object has all arpeggio notes from arpeggios across all voices.
             // see VoiceGenerator. Doesn't matter for Vexflow for now though
-            if (voiceEntry.notes && voiceEntry.notes.length > 1) {
+            if (voiceEntry.notes && voiceEntry.notes.length > 0) {
                 const type: VF.Stroke.Type = VexFlowConverter.StrokeTypeFromArpeggioType(arpeggio.type);
                 const stroke: VF.Stroke = new VF.Stroke(type, {
                     all_voices: this.rules.ArpeggiosGoAcrossVoices
@@ -1539,7 +1539,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 }
             } else {
                 log.debug(`[OSMD] arpeggio in measure ${this.MeasureNumber} could not be drawn.
-                voice entry had less than two notes, arpeggio is likely between voice entries, not currently supported in Vexflow.`);
+                voice entry had no notes, arpeggio is likely between voice entries, not currently supported in Vexflow.`);
                 // TODO: create new arpeggio with all the arpeggio's notes (arpeggio.notes), perhaps with GhostNotes in a new vfStaveNote. not easy.
             }
         }

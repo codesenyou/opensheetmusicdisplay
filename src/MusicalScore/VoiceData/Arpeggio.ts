@@ -2,15 +2,17 @@ import { VoiceEntry } from "./VoiceEntry";
 import { Note } from "./Note";
 
 export class Arpeggio {
-    constructor(parentVoiceEntry: VoiceEntry, type: ArpeggioType = ArpeggioType.ARPEGGIO_DIRECTIONLESS) {
+    constructor(parentVoiceEntry: VoiceEntry, type: ArpeggioType = ArpeggioType.ARPEGGIO_DIRECTIONLESS, number: string = "1") {
         this.parentVoiceEntry = parentVoiceEntry;
         this.type = type;
+        this.number = number;
         this.notes = [];
     }
 
     public parentVoiceEntry: VoiceEntry;
     public notes: Note[];
     public type: ArpeggioType;
+    public number: string;
 
     public addNote(note: Note): void {
         this.notes.push(note);
