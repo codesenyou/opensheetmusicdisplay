@@ -66,6 +66,14 @@ function renderSmuflOrnament(ornament, ctx, glyphX, glyphY) {
   const x = glyphX - (width / 2);
   const y = glyphY + (fontSize * (0.36 + yOffset));
   ctx.fillText(ornament.ornament.smuflGlyph, x, y);
+  if (ornament.ornament.smuflVerticalStroke) {
+    const strokeX = x + (width * (ornament.ornament.smuflVerticalStrokeX || 0.5));
+    ctx.beginPath();
+    ctx.setLineWidth(Math.max(1.6, fontSize * 0.05));
+    ctx.moveTo(strokeX, y - (fontSize * 0.58));
+    ctx.lineTo(strokeX, y - (fontSize * 0.16));
+    ctx.stroke({ 'stroke-linecap': 'butt' });
+  }
   ctx.restore();
   return measured.height || fontSize;
 }
