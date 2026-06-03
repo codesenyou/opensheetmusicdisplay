@@ -421,6 +421,26 @@ export class ArticulationReader {
       return this.createOrnamentContainer(ornamentType, mordentNode, this.vexflowOrnamentFor(ornamentType));
     }
 
+    const turnNode: IXmlElement = ornamentsNode.element("turn");
+    if (turnNode) {
+      return this.createOrnamentContainer(OrnamentEnum.Turn, turnNode, "turn");
+    }
+
+    const invertedTurnNode: IXmlElement = ornamentsNode.element("inverted-turn");
+    if (invertedTurnNode) {
+      return this.createOrnamentContainer(OrnamentEnum.InvertedTurn, invertedTurnNode, "turn_inverted");
+    }
+
+    const delayedTurnNode: IXmlElement = ornamentsNode.element("delayed-turn");
+    if (delayedTurnNode) {
+      return this.createOrnamentContainer(OrnamentEnum.DelayedTurn, delayedTurnNode);
+    }
+
+    const delayedInvertedTurnNode: IXmlElement = ornamentsNode.element("delayed-inverted-turn");
+    if (delayedInvertedTurnNode) {
+      return this.createOrnamentContainer(OrnamentEnum.DelayedInvertedTurn, delayedInvertedTurnNode);
+    }
+
     return undefined;
   }
 

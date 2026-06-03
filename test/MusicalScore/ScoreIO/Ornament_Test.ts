@@ -84,6 +84,10 @@ describe("MusicXML parser for ornaments", () => {
     ["<inverted-mordent long=\"yes\" approach=\"above\"/>", OrnamentEnum.DownPrall],
     ["<inverted-mordent long=\"yes\" departure=\"below\"/>", OrnamentEnum.PrallUp],
     ["<inverted-mordent long=\"yes\" departure=\"above\"/>", OrnamentEnum.PrallDown],
+    ["<turn/>", OrnamentEnum.Turn],
+    ["<inverted-turn/>", OrnamentEnum.InvertedTurn],
+    ["<delayed-turn/>", OrnamentEnum.DelayedTurn],
+    ["<delayed-inverted-turn/>", OrnamentEnum.DelayedInvertedTurn],
   ];
 
   for (const [ornamentXml, expectedEnum] of musicXmlOrnamentExpectations) {
