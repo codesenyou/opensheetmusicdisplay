@@ -75,6 +75,17 @@ import { LyricsEntry } from "../VoiceData/Lyrics/LyricsEntry";
 import { Voice } from "../VoiceData/Voice";
 import { TabNote } from "../VoiceData/TabNote";
 
+interface FingeringCollisionRect {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    penalty: number;
+    maxShift?: number;
+    soft?: boolean;
+    isFingering?: boolean;
+}
+
 /**
  * Class used to do all the calculations in a MusicSheet, which in the end populates a GraphicalMusicSheet.
  */
@@ -560,6 +571,8 @@ export abstract class MusicSheetCalculator {
             relativeY = skyLineMinValue;
         }
 
+        const maxMeasureNumberDistanceAboveStaff: number = this.rules.MeasureNumberLabelHeight + 0.7;
+        relativeY = Math.max(relativeY, -maxMeasureNumberDistanceAboveStaff);
         relativeY = Math.min(0, relativeY);
 
         graphicalLabel.PositionAndShape.RelativePosition = new PointF2D(relativeX, relativeY);
@@ -3186,12 +3199,425 @@ export abstract class MusicSheetCalculator {
         }
     }
 
-    private getFingeringPlacement(measure: GraphicalMeasure): PlacementEnum {
+    private getFingeringPlacement(measure: GraphicalMeasure, fingering?: TechnicalInstruction): PlacementEnum {
         let placement: PlacementEnum = this.rules.FingeringPosition;
+        if (this.rules.FingeringPositionFromXML &&
+            placement !== PlacementEnum.NotYetDefined &&
+            placement !== PlacementEnum.AboveOrBelow &&
+            (fingering?.placement === PlacementEnum.Above || fingering?.placement === PlacementEnum.Below)) {
+            placement = fingering.placement;
+        }
         if (placement === PlacementEnum.NotYetDefined || placement === PlacementEnum.AboveOrBelow) {
             placement = measure.isUpperStaffOfInstrument() ? PlacementEnum.Above : PlacementEnum.Below;
         }
         return placement;
+    }
+
+    private getFingeringNoteEdge(graphicalNote: GraphicalNote, line: StaffLine, placement: PlacementEnum): number {
+        if (!graphicalNote) {
+            return undefined;
+        }
+        const noteheadLine: number = graphicalNote.staffLine;
+        if (Number.isFinite(noteheadLine)) {
+            return placement === PlacementEnum.Above ? noteheadLine - 0.8 : noteheadLine + 0.8;
+        }
+        const noteY: number = this.getRelativeYToAncestor(graphicalNote.PositionAndShape, line.PositionAndShape);
+        if (!Number.isFinite(noteY)) {
+            return undefined;
+        }
+        return placement === PlacementEnum.Above
+            ? noteY + graphicalNote.PositionAndShape.BorderMarginTop
+            : noteY + graphicalNote.PositionAndShape.BorderMarginBottom;
+    }
+
+    private getFingeringAnchorY(gse: GraphicalStaffEntry, fingering: TechnicalInstruction, line: StaffLine,
+                                placement: PlacementEnum, ownerNote?: GraphicalNote): number {
+        const ownerEdge: number = this.getFingeringNoteEdge(ownerNote, line, placement);
+        if (Number.isFinite(ownerEdge)) {
+            return ownerEdge;
+        }
+
+        let anchorY: number = undefined;
+        for (const voiceEntry of gse.graphicalVoiceEntries) {
+            for (const graphicalNote of voiceEntry.notes) {
+                const sourceNote: Note = graphicalNote.sourceNote;
+                if (sourceNote !== fingering.sourceNote && sourceNote.Fingering !== fingering) {
+                    continue;
+                }
+                const noteEdge: number = this.getFingeringNoteEdge(graphicalNote, line, placement);
+                if (!Number.isFinite(noteEdge)) {
+                    continue;
+                }
+                anchorY = anchorY === undefined
+                    ? noteEdge
+                    : placement === PlacementEnum.Above ? Math.min(anchorY, noteEdge) : Math.max(anchorY, noteEdge);
+            }
+        }
+        return anchorY;
+    }
+
+    private getRelativePositionToAncestor(shape: BoundingBox, ancestor: BoundingBox): PointF2D {
+        let x: number = shape.RelativePosition.x;
+        let y: number = shape.RelativePosition.y;
+        let parent: BoundingBox = shape.Parent;
+        while (parent && parent !== ancestor) {
+            x += parent.RelativePosition.x;
+            y += parent.RelativePosition.y;
+            parent = parent.Parent;
+        }
+        return parent === ancestor ? new PointF2D(x, y) : undefined;
+    }
+
+    private getRelativeYToAncestor(shape: BoundingBox, ancestor: BoundingBox): number {
+        return this.getRelativePositionToAncestor(shape, ancestor)?.y;
+    }
+
+    private getFingeringOwnerNote(gse: GraphicalStaffEntry, fingering: TechnicalInstruction): GraphicalNote {
+        let fallback: GraphicalNote = undefined;
+        for (const voiceEntry of gse.graphicalVoiceEntries) {
+            const ownsInstruction: boolean = voiceEntry.parentVoiceEntry?.TechnicalInstructions?.indexOf(fingering) >= 0;
+            for (const graphicalNote of voiceEntry.notes) {
+                const sourceNote: Note = graphicalNote.sourceNote;
+                if (sourceNote === fingering.sourceNote || sourceNote.Fingering === fingering) {
+                    return graphicalNote;
+                }
+                if (!fallback && ownsInstruction) {
+                    fallback = graphicalNote;
+                }
+            }
+        }
+        return fallback;
+    }
+
+    private getFingeringLabelHeight(label: GraphicalLabel): number {
+        label.setLabelPositionAndShapeBorders();
+        return Math.max(0.1, label.PositionAndShape.BorderMarginBottom - label.PositionAndShape.BorderMarginTop);
+    }
+
+    private setFingeringLabelPosition(label: GraphicalLabel, x: number, y: number, placement: PlacementEnum): void {
+        label.Label.textAlignment = placement === PlacementEnum.Above ?
+            TextAlignmentEnum.CenterBottom : TextAlignmentEnum.CenterTop;
+        label.setLabelPositionAndShapeBorders();
+        label.PositionAndShape.RelativePosition = new PointF2D(x, y);
+        label.PositionAndShape.calculateBoundingBox();
+    }
+
+    private getFingeringStackSpacing(labelHeight: number): number {
+        return Math.max(this.rules.FingeringPaddingY + labelHeight * 0.58, 0.42);
+    }
+
+    private getFingeringLaneOrder(gse: GraphicalStaffEntry, fingeringOwners: GraphicalNote[]): GraphicalNote[] {
+        const laneNotes: GraphicalNote[] = [];
+        for (const owner of fingeringOwners) {
+            if (owner && laneNotes.indexOf(owner) < 0) {
+                laneNotes.push(owner);
+            }
+        }
+
+        const voicedEntries: GraphicalVoiceEntry[] = gse.graphicalVoiceEntries.filter(
+            (voiceEntry: GraphicalVoiceEntry) => !voiceEntry.parentVoiceEntry?.IsGrace && voiceEntry.notes.length > 0);
+        if (voicedEntries.length > 1) {
+            for (const voiceEntry of voicedEntries) {
+                const sortedNotes: GraphicalNote[] = voiceEntry.notes.slice().sort(
+                    (a: GraphicalNote, b: GraphicalNote) => this.getGraphicalNoteCenterY(a) - this.getGraphicalNoteCenterY(b));
+                const topNote: GraphicalNote = sortedNotes[0];
+                const bottomNote: GraphicalNote = sortedNotes[sortedNotes.length - 1];
+                if (topNote && laneNotes.indexOf(topNote) < 0) {
+                    laneNotes.push(topNote);
+                }
+                if (bottomNote && laneNotes.indexOf(bottomNote) < 0) {
+                    laneNotes.push(bottomNote);
+                }
+            }
+        }
+
+        return laneNotes.sort((a: GraphicalNote, b: GraphicalNote) => this.getGraphicalNoteCenterY(a) - this.getGraphicalNoteCenterY(b));
+    }
+
+    private getGraphicalNoteCenterY(note: GraphicalNote): number {
+        if (Number.isFinite(note?.staffLine)) {
+            return note.staffLine;
+        }
+        const noteY: number = note?.PositionAndShape?.RelativePosition?.y;
+        if (Number.isFinite(noteY)) {
+            return noteY;
+        }
+        return 0;
+    }
+
+    private getFingeringStackSlots(fingerings: TechnicalInstruction[], owners: GraphicalNote[],
+                                   gse: GraphicalStaffEntry, placement: PlacementEnum): number[] {
+        const laneOrder: GraphicalNote[] = this.getFingeringLaneOrder(gse, owners);
+        const baseSlotOccurrences: Map<number, number> = new Map<number, number>();
+        let nextFallbackSlot: number = Math.min(laneOrder.length, 1);
+
+        return fingerings.map((_fingering: TechnicalInstruction, index: number) => {
+            const owner: GraphicalNote = owners[index];
+            if (!owner || laneOrder.length === 0) {
+                return nextFallbackSlot++;
+            }
+
+            const laneIndex: number = laneOrder.indexOf(owner);
+            const distanceFromPlacementSide: number = placement === PlacementEnum.Above ?
+                laneIndex : laneOrder.length - 1 - laneIndex;
+            const baseSlot: number = Math.min(distanceFromPlacementSide, 1);
+            const occurrence: number = baseSlotOccurrences.get(baseSlot) ?? 0;
+            baseSlotOccurrences.set(baseSlot, occurrence + 1);
+            return baseSlot + occurrence;
+        });
+    }
+
+    private getBoundingBoxRectInStaffLine(shape: BoundingBox, line: StaffLine, margin: boolean = false): FingeringCollisionRect {
+        const relativePosition: PointF2D = this.getRelativePositionToAncestor(shape, line.PositionAndShape);
+        if (!relativePosition) {
+            return undefined;
+        }
+        return {
+            left: relativePosition.x + (margin ? shape.BorderMarginLeft : shape.BorderLeft),
+            right: relativePosition.x + (margin ? shape.BorderMarginRight : shape.BorderRight),
+            top: relativePosition.y + (margin ? shape.BorderMarginTop : shape.BorderTop),
+            bottom: relativePosition.y + (margin ? shape.BorderMarginBottom : shape.BorderBottom),
+            penalty: 1
+        };
+    }
+
+    private getMeasureNumberRectInStaffLine(label: GraphicalLabel, line: StaffLine): FingeringCollisionRect {
+        const labelPosition: PointF2D = label.PositionAndShape.RelativePosition;
+        const staffLinePosition: PointF2D = line.PositionAndShape.RelativePosition;
+        return {
+            left: labelPosition.x - staffLinePosition.x + label.PositionAndShape.BorderMarginLeft,
+            right: labelPosition.x - staffLinePosition.x + label.PositionAndShape.BorderMarginRight,
+            top: labelPosition.y - staffLinePosition.y + label.PositionAndShape.BorderMarginTop,
+            bottom: labelPosition.y - staffLinePosition.y + label.PositionAndShape.BorderMarginBottom,
+            penalty: 1.5
+        };
+    }
+
+    private addRectIfValid(rects: FingeringCollisionRect[], rect: FingeringCollisionRect): void {
+        if (!rect ||
+            !Number.isFinite(rect.left) || !Number.isFinite(rect.right) ||
+            !Number.isFinite(rect.top) || !Number.isFinite(rect.bottom) ||
+            rect.right <= rect.left || rect.bottom <= rect.top) {
+            return;
+        }
+        rects.push(rect);
+    }
+
+    private expandFingeringRect(rect: FingeringCollisionRect, padding: number): FingeringCollisionRect {
+        return {
+            left: rect.left - padding,
+            right: rect.right + padding,
+            top: rect.top - padding,
+            bottom: rect.bottom + padding,
+            penalty: rect.penalty
+        };
+    }
+
+    private getRectOverlapArea(a: FingeringCollisionRect, b: FingeringCollisionRect): number {
+        const overlapWidth: number = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+        const overlapHeight: number = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+        if (overlapWidth <= 0 || overlapHeight <= 0) {
+            return 0;
+        }
+        return overlapWidth * overlapHeight;
+    }
+
+    private getLabelRect(label: GraphicalLabel): FingeringCollisionRect {
+        return {
+            left: label.PositionAndShape.RelativePosition.x + label.PositionAndShape.BorderMarginLeft,
+            right: label.PositionAndShape.RelativePosition.x + label.PositionAndShape.BorderMarginRight,
+            top: label.PositionAndShape.RelativePosition.y + label.PositionAndShape.BorderMarginTop,
+            bottom: label.PositionAndShape.RelativePosition.y + label.PositionAndShape.BorderMarginBottom,
+            penalty: 1
+        };
+    }
+
+    private getCompactFingeringStackRect(rect: FingeringCollisionRect): FingeringCollisionRect {
+        const height: number = rect.bottom - rect.top;
+        const reservedHeight: number = Math.min(height, 0.62);
+        const verticalInset: number = Math.max(0, (height - reservedHeight) / 2);
+        return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top + verticalInset,
+            bottom: rect.bottom - verticalInset,
+            penalty: rect.penalty,
+            maxShift: rect.maxShift,
+            soft: rect.soft,
+            isFingering: rect.isFingering
+        };
+    }
+
+    private getExistingFingeringCollisionRect(label: GraphicalLabel, placement: PlacementEnum): FingeringCollisionRect {
+        const rect: FingeringCollisionRect = this.getLabelRect(label);
+        rect.isFingering = true;
+        return placement === PlacementEnum.Below ? this.getCompactFingeringStackRect(rect) : rect;
+    }
+
+    private addFingeringTieCollisionRects(rects: FingeringCollisionRect[], gse: GraphicalStaffEntry,
+                                          line: StaffLine): void {
+        for (const graphicalTie of gse.GraphicalTies) {
+            const startNote: GraphicalNote = graphicalTie.StartNote;
+            const endNote: GraphicalNote = graphicalTie.EndNote;
+            const startRect: FingeringCollisionRect = startNote ?
+                this.getBoundingBoxRectInStaffLine(startNote.PositionAndShape, line, true) : undefined;
+            const endRect: FingeringCollisionRect = endNote ?
+                this.getBoundingBoxRectInStaffLine(endNote.PositionAndShape, line, true) : undefined;
+            if (!startRect && !endRect) {
+                continue;
+            }
+            const tieDirection: PlacementEnum = graphicalTie.Tie.getTieDirection(startNote?.sourceNote);
+            const left: number = Math.min(startRect?.left ?? endRect.left, endRect?.left ?? startRect.left) - 0.15;
+            const right: number = Math.max(startRect?.right ?? endRect.right, endRect?.right ?? startRect.right) + 0.15;
+            const referenceTop: number = Math.min(startRect?.top ?? endRect.top, endRect?.top ?? startRect.top);
+            const referenceBottom: number = Math.max(startRect?.bottom ?? endRect.bottom, endRect?.bottom ?? startRect.bottom);
+            const centerY: number = tieDirection === PlacementEnum.Below ? referenceBottom + 0.45 : referenceTop - 0.45;
+            this.addRectIfValid(rects, {
+                left,
+                right,
+                top: centerY - 0.25,
+                bottom: centerY + 0.25,
+                penalty: 0.8
+            });
+        }
+    }
+
+    private addFingeringOrnamentReserveRects(rects: FingeringCollisionRect[], gse: GraphicalStaffEntry,
+                                             line: StaffLine): void {
+        for (const voiceEntry of gse.graphicalVoiceEntries) {
+            if (!voiceEntry.parentVoiceEntry?.OrnamentContainer || voiceEntry.notes.length === 0) {
+                continue;
+            }
+            const noteRect: FingeringCollisionRect =
+                this.getBoundingBoxRectInStaffLine(voiceEntry.notes[0].PositionAndShape, line, true);
+            if (!noteRect) {
+                continue;
+            }
+            const ornamentPlacement: PlacementEnum = voiceEntry.parentVoiceEntry.OrnamentContainer.placement;
+            const centerX: number = (noteRect.left + noteRect.right) / 2;
+            const above: boolean = ornamentPlacement !== PlacementEnum.Below;
+            this.addRectIfValid(rects, {
+                left: centerX - 0.85,
+                right: centerX + 0.85,
+                top: above ? noteRect.top - 1.3 : noteRect.bottom + 0.15,
+                bottom: above ? noteRect.top - 0.15 : noteRect.bottom + 1.3,
+                penalty: 0.7
+            });
+        }
+    }
+
+    private getFingeringCollisionRects(system: MusicSystem, line: StaffLine, measure: GraphicalMeasure,
+                                       placement: PlacementEnum,
+                                       currentGse: GraphicalStaffEntry): FingeringCollisionRect[] {
+        const rects: FingeringCollisionRect[] = [];
+        const currentMeasureIndex: number = line.Measures.indexOf(measure);
+        const firstMeasureIndex: number = Math.max(0, currentMeasureIndex - 1);
+        const lastMeasureIndex: number = Math.min(line.Measures.length - 1, currentMeasureIndex + 1);
+        for (let measureIndex: number = firstMeasureIndex; measureIndex <= lastMeasureIndex; measureIndex++) {
+            const nearbyMeasure: GraphicalMeasure = line.Measures[measureIndex];
+            for (const staffEntry of nearbyMeasure.staffEntries) {
+                for (const voiceEntry of staffEntry.graphicalVoiceEntries) {
+                    const voiceEntryRect: FingeringCollisionRect =
+                        this.getBoundingBoxRectInStaffLine(voiceEntry.PositionAndShape, line, true);
+                    if (voiceEntryRect) {
+                        voiceEntryRect.penalty = 0.35;
+                    }
+                    this.addRectIfValid(rects, voiceEntryRect);
+                    for (const note of voiceEntry.notes) {
+                        this.addRectIfValid(rects, this.getBoundingBoxRectInStaffLine(note.PositionAndShape, line, true));
+                    }
+                }
+                for (const existingFingering of staffEntry.FingeringEntries) {
+                    this.addRectIfValid(rects, this.getExistingFingeringCollisionRect(existingFingering, placement));
+                }
+                this.addFingeringOrnamentReserveRects(rects, staffEntry, line);
+                if (staffEntry === currentGse) {
+                    this.addFingeringTieCollisionRects(rects, staffEntry, line);
+                }
+            }
+        }
+        for (const measureNumberLabel of system.MeasureNumberLabels) {
+            this.addRectIfValid(rects, this.getMeasureNumberRectInStaffLine(measureNumberLabel, line));
+        }
+        return rects;
+    }
+
+    private placeFingeringLabel(label: GraphicalLabel, fingering: TechnicalInstruction, gse: GraphicalStaffEntry,
+                                measure: GraphicalMeasure, line: StaffLine, system: MusicSystem,
+                                stackIndex: number): PlacementEnum {
+        const placement: PlacementEnum = this.getFingeringPlacement(measure, fingering);
+        const owningNote: GraphicalNote = this.getFingeringOwnerNote(gse, fingering);
+        const anchorY: number = this.getFingeringAnchorY(gse, fingering, line, placement, owningNote);
+        const fallbackAnchorY: number = owningNote ?
+            this.getRelativeYToAncestor(owningNote.PositionAndShape, line.PositionAndShape) :
+            (placement === PlacementEnum.Above ? 0 : this.rules.StaffHeight);
+        const staffEntryPositionX: number =
+            gse.PositionAndShape.RelativePosition.x + measure.PositionAndShape.RelativePosition.x;
+        const ownerRect: FingeringCollisionRect = owningNote ?
+            this.getBoundingBoxRectInStaffLine(owningNote.PositionAndShape, line, false) : undefined;
+        const ownerCenterX: number = ownerRect ? (ownerRect.left + ownerRect.right) / 2 : staffEntryPositionX;
+        const collisionRects: FingeringCollisionRect[] = this.getFingeringCollisionRects(system, line, measure, placement, gse);
+        const usableAnchorY: number = Number.isFinite(anchorY) ? anchorY :
+            (Number.isFinite(fallbackAnchorY) ? fallbackAnchorY : placement === PlacementEnum.Above ? 0 : this.rules.StaffHeight);
+        const labelHeight: number = this.getFingeringLabelHeight(label);
+        const distance: number = 0.18 + stackIndex * this.getFingeringStackSpacing(labelHeight);
+        let y: number = placement === PlacementEnum.Above ? usableAnchorY - distance : usableAnchorY + distance;
+        this.setFingeringLabelPosition(label, ownerCenterX, y, placement);
+
+        const padding: number = 0.08;
+        const skyBottomLineCalculator: SkyBottomLineCalculator = line.SkyBottomLineCalculator;
+        for (let attempt: number = 0; attempt < 24; attempt++) {
+            const rawLabelRect: FingeringCollisionRect = this.getLabelRect(label);
+            const labelRect: FingeringCollisionRect = this.expandFingeringRect(rawLabelRect, padding);
+            const compactLabelRect: FingeringCollisionRect = this.expandFingeringRect(
+                this.getCompactFingeringStackRect(rawLabelRect), padding);
+            let outwardShift: number = 0;
+            for (const rect of collisionRects) {
+                const activeLabelRect: FingeringCollisionRect =
+                    placement === PlacementEnum.Below && rect.isFingering ? compactLabelRect : labelRect;
+                if (this.getRectOverlapArea(activeLabelRect, rect) <= 0) {
+                    continue;
+                }
+                let requiredShift: number = placement === PlacementEnum.Above ?
+                    activeLabelRect.bottom - rect.top + padding :
+                    rect.bottom - activeLabelRect.top + padding;
+                if (rect.penalty < 0.5 && requiredShift > 0.8) {
+                    requiredShift = attempt === 0 ? 0.45 : 0;
+                }
+                outwardShift = Math.max(outwardShift, requiredShift);
+            }
+
+            if (placement === PlacementEnum.Above) {
+                const skyline: number = skyBottomLineCalculator.getSkyLineMinInRange(labelRect.left, labelRect.right);
+                if (Number.isFinite(skyline) && labelRect.bottom > skyline - padding) {
+                    outwardShift = Math.max(outwardShift, Math.min(labelRect.bottom - skyline + padding, 0.45));
+                }
+            } else {
+                const bottomline: number = skyBottomLineCalculator.getBottomLineMaxInRange(labelRect.left, labelRect.right);
+                if (Number.isFinite(bottomline) && labelRect.top < bottomline + padding) {
+                    outwardShift = Math.max(outwardShift, Math.min(bottomline - labelRect.top + padding, 0.45));
+                }
+            }
+
+            if (outwardShift <= 0) {
+                break;
+            }
+
+            y += placement === PlacementEnum.Above ? -outwardShift : outwardShift;
+            this.setFingeringLabelPosition(label, ownerCenterX, y, placement);
+        }
+        return placement;
+    }
+
+    private updateFingeringSkyBottomLine(label: GraphicalLabel, placement: PlacementEnum, line: StaffLine): void {
+        const labelRect: FingeringCollisionRect = placement === PlacementEnum.Below ?
+            this.getCompactFingeringStackRect(this.getLabelRect(label)) :
+            this.getLabelRect(label);
+        if (placement === PlacementEnum.Above) {
+            line.SkyBottomLineCalculator.updateSkyLineInRange(labelRect.left, labelRect.right, labelRect.top);
+        } else if (placement === PlacementEnum.Below) {
+            line.SkyBottomLineCalculator.updateBottomLineInRange(labelRect.left, labelRect.right, labelRect.bottom);
+        }
     }
 
     public calculateFingerings(): void {
@@ -3205,12 +3631,9 @@ export abstract class MusicSheetCalculator {
                     if (measure.isTabMeasure && !this.rules.TabFingeringsRendered) {
                         continue; // don't duplicate fingerings into tab measures. tab notes are already
                     }
-                    const placement: PlacementEnum = this.getFingeringPlacement(measure);
+                    const defaultPlacement: PlacementEnum = this.getFingeringPlacement(measure);
                     for (const gse of measure.staffEntries) {
                         gse.FingeringEntries = [];
-                        const skybottomcalculator: SkyBottomLineCalculator = line.SkyBottomLineCalculator;
-                        const staffEntryPositionX: number = gse.PositionAndShape.RelativePosition.x +
-                            measure.PositionAndShape.RelativePosition.x;
                         const fingerings: TechnicalInstruction[] = [];
                         for (const voiceEntry of gse.graphicalVoiceEntries) {
                             if (voiceEntry.parentVoiceEntry.IsGrace) {
@@ -3229,30 +3652,19 @@ export abstract class MusicSheetCalculator {
                             //     }
                             // }
                         }
-                        if (fingerings.length > 0) {
-                            // const isBulkFingering: boolean = fingerings.last().sourceNote === fingerings[0].sourceNote;
-                            //   // bulk fingering = more than one fingering per note given in MusicXML. (some programs export like this sometimes)
-                            // console.log("isBulkFingering: " + isBulkFingering);
-                            if (placement === PlacementEnum.Below) {
-                                fingerings.reverse();
-                            }
-                            let topNote: Note;
-                            for (const gve of gse.graphicalVoiceEntries) {
-                                for (const note of gve.notes) {
-                                    if (!topNote || note.sourceNote.Pitch?.getHalfTone() > topNote.Pitch?.getHalfTone()) {
-                                        topNote = note.sourceNote;
-                                    }
-                                }
-                            }
-                            if (fingerings[0].sourceNote === topNote && placement === PlacementEnum.Above) {
-                                // || fingerings[0].sourceNote === topNote && placement === PlacementEnum.Below && isBulkFingering // doesn't seem necessary
-                                // TODO more elegant solution: order fingerings in the order of each individual note.
-                                //   this is already a rare situation though, would be even more rare for this to matter, and more complex.
-                                fingerings.reverse();
-                            }
-                        }
-                        for (let i: number = 0; i < fingerings.length; i++) {
-                            const fingering: TechnicalInstruction = fingerings[i];
+                        const fingeringOwners: GraphicalNote[] = fingerings.map(
+                            (fingering: TechnicalInstruction) => this.getFingeringOwnerNote(gse, fingering));
+                        const stackSlots: number[] = this.getFingeringStackSlots(fingerings, fingeringOwners, gse, defaultPlacement);
+                        const placementItems: { fingering: TechnicalInstruction, slot: number, sourceIndex: number }[] =
+                            fingerings.map((fingering: TechnicalInstruction, index: number) => ({
+                                fingering,
+                                slot: stackSlots[index],
+                                sourceIndex: index
+                            })).sort((a, b) => a.slot - b.slot || a.sourceIndex - b.sourceIndex);
+
+                        for (const placementItem of placementItems) {
+                            const fingering: TechnicalInstruction = placementItem.fingering;
+                            const placement: PlacementEnum = this.getFingeringPlacement(measure, fingering);
                             const alignment: TextAlignmentEnum =
                                 placement === PlacementEnum.Above ? TextAlignmentEnum.CenterBottom : TextAlignmentEnum.CenterTop;
                             const label: Label = new Label(fingering.value, alignment);
@@ -3261,41 +3673,10 @@ export abstract class MusicSheetCalculator {
                             if (fingering.fontFamily) {
                                 label.fontFamily = fingering.fontFamily;
                             }
-                            const marginLeft: number = staffEntryPositionX + gLabel.PositionAndShape.BorderMarginLeft;
-                            const marginRight: number = staffEntryPositionX + gLabel.PositionAndShape.BorderMarginRight;
-                            let skybottomFurthest: number = undefined;
-                            if (placement === PlacementEnum.Above) {
-                                skybottomFurthest = skybottomcalculator.getSkyLineMinInRange(marginLeft, marginRight);
-                            } else {
-                                skybottomFurthest = skybottomcalculator.getBottomLineMaxInRange(marginLeft, marginRight);
-                            }
-                            let yShift: number = 0;
-                            if (i === 0) {
-                                yShift += this.rules.FingeringOffsetY;
-                                if (placement === PlacementEnum.Above) {
-                                    yShift += 0.1; // above fingerings are a bit closer to the notes than below ones for some reason
-                                }
-                            } else {
-                                yShift += this.rules.FingeringPaddingY;
-                            }
-                            if (placement === PlacementEnum.Above) {
-                                yShift *= -1;
-                            }
-                            gLabel.PositionAndShape.RelativePosition.y += skybottomFurthest + yShift;
-                            gLabel.PositionAndShape.RelativePosition.x = staffEntryPositionX;
-                            gLabel.setLabelPositionAndShapeBorders();
-                            gLabel.PositionAndShape.calculateBoundingBox();
+                            const acceptedPlacement: PlacementEnum =
+                                this.placeFingeringLabel(gLabel, fingering, gse, measure, line, system, placementItem.slot);
                             gse.FingeringEntries.push(gLabel);
-                            const start: number = gLabel.PositionAndShape.RelativePosition.x + gLabel.PositionAndShape.BorderLeft;
-                            //start -= line.PositionAndShape.RelativePosition.x;
-                            const end: number = start - gLabel.PositionAndShape.BorderLeft + gLabel.PositionAndShape.BorderRight;
-                            if (placement === PlacementEnum.Above) {
-                                skybottomcalculator.updateSkyLineInRange(
-                                    start, end, gLabel.PositionAndShape.RelativePosition.y + gLabel.PositionAndShape.BorderTop); // BorderMarginTop too much
-                            } else if (placement === PlacementEnum.Below) {
-                                skybottomcalculator.updateBottomLineInRange(
-                                    start, end, gLabel.PositionAndShape.RelativePosition.y + gLabel.PositionAndShape.BorderBottom);
-                            }
+                            this.updateFingeringSkyBottomLine(gLabel, acceptedPlacement, line);
                         }
                     }
                 }

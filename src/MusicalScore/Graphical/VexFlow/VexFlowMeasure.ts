@@ -52,6 +52,13 @@ interface TieCollisionMetadata {
     directionLockedByXml: boolean;
 }
 
+interface TieCollisionBaseline {
+    cp1: number;
+    cp2: number;
+    yShift: number;
+    direction: number;
+}
+
 interface BeamCollisionBaseline {
     yShift: number;
     stemDirection: number;
@@ -108,6 +115,10 @@ export class VexFlowMeasure extends GraphicalMeasure {
     private vftuplets: { [voiceID: number]: VF.Tuplet[] } = {};
     /** Direction lock and matching metadata for each VexFlow tie. */
     private tieCollisionMetadata: WeakMap<VF.StaveTie, TieCollisionMetadata> = new WeakMap();
+    /** Original VexFlow tie options, so collision optimization stays idempotent across repeated draws. */
+    private tieCollisionBaselines: WeakMap<VF.StaveTie, TieCollisionBaseline> = new WeakMap();
+    /** Original VexFlow beam/stem options, so collision optimization stays idempotent across repeated draws. */
+    private beamCollisionBaselines: WeakMap<VF.Beam, BeamCollisionBaseline> = new WeakMap();
     // The engraving rules of OSMD.
     public rules: EngravingRules;
 
@@ -1914,12 +1925,15 @@ export class VexFlowMeasure extends GraphicalMeasure {
         if (!renderOptions || noteheadSamples.length === 0) {
             return;
         }
-        const baseCp1: number = Number.isFinite(renderOptions.cp1) ? Math.max(3, renderOptions.cp1) : 8;
-        const originalCp2: number = Number.isFinite(renderOptions.cp2) ? renderOptions.cp2 : 12;
-        const thickenedCp2: number = Math.max(baseCp1 + 4.2, originalCp2 + 1.25); // make ties visibly thicker, but keep it light.
-        const baseYShift: number = Number.isFinite(renderOptions.y_shift) ? Math.max(3, renderOptions.y_shift) : 7;
+        const baseline: TieCollisionBaseline = this.getTieCollisionBaseline(staveTie, tie);
+        this.applyTieCollisionBaseline(tie, baseline);
 
-        const currentDirection: number = this.getTieDirection(tie);
+        const baseCp1: number = Math.max(3, baseline.cp1);
+        const originalCp2: number = baseline.cp2;
+        const thickenedCp2: number = Math.max(baseCp1 + 4.2, originalCp2 + 1.25); // make ties visibly thicker, but keep it light.
+        const baseYShift: number = Math.max(3, baseline.yShift);
+
+        const currentDirection: number = baseline.direction;
         const directionLockedByXml: boolean = this.tieCollisionMetadata.get(staveTie)?.directionLockedByXml ?? false;
         const directionCandidates: number[] = directionLockedByXml ? [currentDirection] : [currentDirection, -currentDirection];
 
@@ -1952,6 +1966,34 @@ export class VexFlowMeasure extends GraphicalMeasure {
         renderOptions.y_shift = bestYShift;
         if (bestDirection !== currentDirection && typeof tie.setDirection === "function") {
             tie.setDirection(bestDirection);
+        }
+    }
+
+    private getTieCollisionBaseline(staveTie: VF.StaveTie, tie: any): TieCollisionBaseline {
+        const existingBaseline: TieCollisionBaseline = this.tieCollisionBaselines.get(staveTie);
+        if (existingBaseline) {
+            return existingBaseline;
+        }
+        const renderOptions: any = tie?.render_options ?? {};
+        const baseline: TieCollisionBaseline = {
+            cp1: Number.isFinite(renderOptions.cp1) ? renderOptions.cp1 : 8,
+            cp2: Number.isFinite(renderOptions.cp2) ? renderOptions.cp2 : 12,
+            yShift: Number.isFinite(renderOptions.y_shift) ? renderOptions.y_shift : 7,
+            direction: this.getTieDirection(tie)
+        };
+        this.tieCollisionBaselines.set(staveTie, baseline);
+        return baseline;
+    }
+
+    private applyTieCollisionBaseline(tie: any, baseline: TieCollisionBaseline): void {
+        if (!tie?.render_options) {
+            return;
+        }
+        tie.render_options.cp1 = baseline.cp1;
+        tie.render_options.cp2 = baseline.cp2;
+        tie.render_options.y_shift = baseline.yShift;
+        if (typeof tie.setDirection === "function") {
+            tie.setDirection(baseline.direction);
         }
     }
 
@@ -2093,11 +2135,9 @@ export class VexFlowMeasure extends GraphicalMeasure {
         if (!beam || !Array.isArray(beam.notes) || beam.notes.length < 2 || noteheadSamples.length === 0) {
             return;
         }
-        if (typeof beam.postFormat === "function") {
-            beam.postFormatted = false;
-            beam.postFormat();
-        }
-        const baseline: BeamCollisionBaseline = this.captureBeamCollisionBaseline(beam);
+        const baseline: BeamCollisionBaseline = this.getBeamCollisionBaseline(vfBeam, beam);
+        this.applyBeamCollisionOffset(beam, baseline, 0);
+
         let bestOffset: number = 0;
         let bestScore: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, 0);
         for (const extensionOffset of [2, 4, 6, 8, 10, 12]) {
@@ -2108,6 +2148,20 @@ export class VexFlowMeasure extends GraphicalMeasure {
             }
         }
         this.applyBeamCollisionOffset(beam, baseline, bestOffset);
+    }
+
+    private getBeamCollisionBaseline(vfBeam: VF.Beam, beam: any): BeamCollisionBaseline {
+        const existingBaseline: BeamCollisionBaseline = this.beamCollisionBaselines.get(vfBeam);
+        if (existingBaseline) {
+            return existingBaseline;
+        }
+        if (typeof beam.postFormat === "function") {
+            beam.postFormatted = false;
+            beam.postFormat();
+        }
+        const baseline: BeamCollisionBaseline = this.captureBeamCollisionBaseline(beam);
+        this.beamCollisionBaselines.set(vfBeam, baseline);
+        return baseline;
     }
 
     private captureBeamCollisionBaseline(beam: any): BeamCollisionBaseline {
