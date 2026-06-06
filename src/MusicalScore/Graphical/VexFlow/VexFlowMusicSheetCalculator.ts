@@ -214,6 +214,8 @@ export class VexFlowMusicSheetCalculator extends MusicSheetCalculator {
       * this.rules.VoiceSpacingMultiplierVexflow
       + this.rules.VoiceSpacingAddendVexflow
       + maxStaffEntries * staffEntryFactor; // TODO use maxStaffEntriesPlusAccidentals here as well, adjust spacing
+      const denseMeasureSpacingFloor: number = maxStaffEntriesPlusAccidentals * 0.78;
+      minStaffEntriesWidth = Math.max(minStaffEntriesWidth, denseMeasureSpacingFloor);
       if (parentSourceMeasure?.ImplicitMeasure) {
         // shrink width in the ratio that the pickup measure is shorter compared to a full measure('s time signature):
         minStaffEntriesWidth = parentSourceMeasure.Duration.RealValue / parentSourceMeasure.ActiveTimeSignature.RealValue * minStaffEntriesWidth;

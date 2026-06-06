@@ -48,6 +48,13 @@ interface NoteheadCollisionSample {
     staveNote: any;
 }
 
+interface StemCollisionSample {
+    x: number;
+    topY: number;
+    bottomY: number;
+    staveNote: any;
+}
+
 interface TieCollisionMetadata {
     directionLockedByXml: boolean;
 }
@@ -689,11 +696,12 @@ export class VexFlowMeasure extends GraphicalMeasure {
             }
         }
         const noteheadSamples: NoteheadCollisionSample[] = this.collectNoteheadCollisionSamples();
+        const stemSamples: StemCollisionSample[] = this.collectStemCollisionSamples();
         // Draw beams
         for (const voiceID in this.vfbeams) {
             if (this.vfbeams.hasOwnProperty(voiceID)) {
                 for (const beam of this.vfbeams[voiceID]) {
-                    this.optimizeBeamAndStemCollision(beam, noteheadSamples);
+                    this.optimizeBeamAndStemCollision(beam, noteheadSamples, stemSamples);
                     beam.setContext(ctx).draw();
                 }
             }
@@ -701,14 +709,14 @@ export class VexFlowMeasure extends GraphicalMeasure {
         // Draw auto-generated beams from Beam.generateBeams()
         if (this.autoVfBeams) {
             for (const beam of this.autoVfBeams) {
-                this.optimizeBeamAndStemCollision(beam, noteheadSamples);
+                this.optimizeBeamAndStemCollision(beam, noteheadSamples, stemSamples);
                 beam.setContext(ctx).draw();
             }
         }
         if (!this.isTabMeasure || this.rules.TupletNumbersInTabs) {
             if (this.autoTupletVfBeams) {
                 for (const beam of this.autoTupletVfBeams) {
-                    this.optimizeBeamAndStemCollision(beam, noteheadSamples);
+                    this.optimizeBeamAndStemCollision(beam, noteheadSamples, stemSamples);
                     beam.setContext(ctx).draw();
                 }
             }
@@ -1056,7 +1064,13 @@ export class VexFlowMeasure extends GraphicalMeasure {
                         }
                     }
                     if (notes.length > 1) {
-                        const vfBeam: VF.Beam = new VF.Beam(notes, autoStemBeam);
+                        const stemDirection: number = autoStemBeam && !hasCrossStaffTransferredNote
+                            ? this.chooseBeamStemDirection(notes)
+                            : undefined;
+                        if (stemDirection !== undefined) {
+                            this.applyStemDirectionToNotes(notes, stemDirection);
+                        }
+                        const vfBeam: VF.Beam = new VF.Beam(notes, stemDirection === undefined ? autoStemBeam : false);
                         if (psBeam.SecondaryBreakIndices?.length > 0) {
                             vfBeam.breakSecondaryAt(psBeam.SecondaryBreakIndices);
                         }
@@ -1911,12 +1925,145 @@ export class VexFlowMeasure extends GraphicalMeasure {
         return samples;
     }
 
+    private collectStemCollisionSamples(): StemCollisionSample[] {
+        const samples: StemCollisionSample[] = [];
+        for (const voiceID in this.vfVoices) {
+            if (!this.vfVoices.hasOwnProperty(voiceID)) {
+                continue;
+            }
+            const voice: any = this.vfVoices[voiceID];
+            const tickables: any[] = voice?.getTickables?.() ?? voice?.tickables;
+            if (!Array.isArray(tickables)) {
+                continue;
+            }
+            for (const tickable of tickables) {
+                if (!tickable || typeof tickable.getStemX !== "function" || typeof tickable.getStemExtents !== "function") {
+                    continue;
+                }
+                if (typeof tickable.isRest === "function" && tickable.isRest()) {
+                    continue;
+                }
+                const x: number = tickable.getStemX();
+                const extents: any = tickable.getStemExtents();
+                const topY: number = extents?.topY;
+                const baseY: number = extents?.baseY;
+                if (!Number.isFinite(x) || !Number.isFinite(topY) || !Number.isFinite(baseY)) {
+                    continue;
+                }
+                samples.push({
+                    x,
+                    topY: Math.min(topY, baseY),
+                    bottomY: Math.max(topY, baseY),
+                    staveNote: tickable
+                });
+            }
+        }
+        return samples;
+    }
+
     private estimateNoteheadRadiusPx(vfNote: any): number {
         const glyphWidth: number = typeof vfNote?.getGlyphWidth === "function" ? vfNote.getGlyphWidth() : 10;
         if (Number.isFinite(glyphWidth) && glyphWidth > 0) {
             return Math.max(3, Math.min(8, glyphWidth * 0.42));
         }
         return 5;
+    }
+
+    private chooseBeamStemDirection(notes: StaveNote[]): number {
+        const defaultDirection: number = this.calculateDefaultBeamStemDirection(notes);
+        const reverseDirection: number = -defaultDirection;
+        const defaultScore: number = this.scoreBeamStemDirectionCandidate(notes, defaultDirection, 0);
+        const reverseScore: number = this.scoreBeamStemDirectionCandidate(notes, reverseDirection, 1.5);
+        return reverseScore < defaultScore ? reverseDirection : defaultDirection;
+    }
+
+    private calculateDefaultBeamStemDirection(notes: StaveNote[]): number {
+        let lineSum: number = 0;
+        for (const note of notes as any[]) {
+            const keyProps: any[] = note?.keyProps;
+            if (!Array.isArray(keyProps)) {
+                continue;
+            }
+            for (const keyProp of keyProps) {
+                const line: number = keyProp?.line;
+                if (Number.isFinite(line)) {
+                    lineSum += line - 3;
+                }
+            }
+        }
+        return lineSum >= 0 ? VF.Stem.DOWN : VF.Stem.UP;
+    }
+
+    private scoreBeamStemDirectionCandidate(notes: StaveNote[], direction: number, directionPenalty: number): number {
+        this.applyStemDirectionToNotes(notes, direction);
+        const beamNotes: Set<any> = new Set<any>(notes);
+        const stemXs: number[] = notes.map((note: any) => note?.getStemX?.()).filter((x: number) => Number.isFinite(x));
+        if (stemXs.length < 2) {
+            return directionPenalty;
+        }
+
+        const firstNote: any = notes[0];
+        const lastNote: any = notes[notes.length - 1];
+        const firstStemX: number = firstNote?.getStemX?.();
+        const lastStemX: number = lastNote?.getStemX?.();
+        const firstStemY: number = firstNote?.getStemExtents?.()?.topY;
+        const lastStemY: number = lastNote?.getStemExtents?.()?.topY;
+        if (!Number.isFinite(firstStemX) || !Number.isFinite(lastStemX) ||
+            !Number.isFinite(firstStemY) || !Number.isFinite(lastStemY) ||
+            firstStemX === lastStemX) {
+            return directionPenalty;
+        }
+
+        const minX: number = Math.min(...stemXs) - 2;
+        const maxX: number = Math.max(...stemXs) + 2;
+        const beamBandHeight: number = 5 * direction;
+        let score: number = directionPenalty;
+
+        for (const sample of this.collectNoteheadCollisionSamples()) {
+            if (sample.x < minX || sample.x > maxX || beamNotes.has(sample.staveNote)) {
+                continue;
+            }
+            const beamLineY: number = this.interpolateLineY(sample.x, firstStemX, firstStemY, lastStemX, lastStemY);
+            if (!Number.isFinite(beamLineY)) {
+                continue;
+            }
+            const bandMin: number = Math.min(beamLineY, beamLineY + beamBandHeight);
+            const bandMax: number = Math.max(beamLineY, beamLineY + beamBandHeight);
+            const noteMin: number = sample.y - sample.radius;
+            const noteMax: number = sample.y + sample.radius;
+            if (noteMax >= bandMin && noteMin <= bandMax) {
+                score += 25;
+            }
+        }
+
+        for (const sample of this.collectStemCollisionSamples()) {
+            if (sample.x < minX || sample.x > maxX || beamNotes.has(sample.staveNote)) {
+                continue;
+            }
+            const beamLineY: number = this.interpolateLineY(sample.x, firstStemX, firstStemY, lastStemX, lastStemY);
+            if (!Number.isFinite(beamLineY)) {
+                continue;
+            }
+            const bandMin: number = Math.min(beamLineY, beamLineY + beamBandHeight) - 0.7;
+            const bandMax: number = Math.max(beamLineY, beamLineY + beamBandHeight) + 0.7;
+            if (sample.bottomY >= bandMin && sample.topY <= bandMax) {
+                score += 18;
+            }
+        }
+        return score;
+    }
+
+    private applyStemDirectionToNotes(notes: StaveNote[], direction: number): void {
+        for (const note of notes as any[]) {
+            if (typeof note?.setStemDirection === "function") {
+                note.setStemDirection(direction);
+            }
+        }
+    }
+
+    private interpolateLineY(x: number, firstX: number, firstY: number, lastX: number, lastY: number): number {
+        const t: number = (x - firstX) / (lastX - firstX);
+        return firstY + (lastY - firstY) * t;
     }
 
     private optimizeTieCollision(staveTie: VF.StaveTie, noteheadSamples: NoteheadCollisionSample[]): void {
@@ -2130,18 +2277,22 @@ export class VexFlowMeasure extends GraphicalMeasure {
         return { firstX, lastX, firstYs, lastYs, firstIndices, lastIndices, firstNote, lastNote };
     }
 
-    private optimizeBeamAndStemCollision(vfBeam: VF.Beam, noteheadSamples: NoteheadCollisionSample[]): void {
+    private optimizeBeamAndStemCollision(
+        vfBeam: VF.Beam,
+        noteheadSamples: NoteheadCollisionSample[],
+        stemSamples: StemCollisionSample[]
+    ): void {
         const beam: any = vfBeam as any;
-        if (!beam || !Array.isArray(beam.notes) || beam.notes.length < 2 || noteheadSamples.length === 0) {
+        if (!beam || !Array.isArray(beam.notes) || beam.notes.length < 2) {
             return;
         }
         const baseline: BeamCollisionBaseline = this.getBeamCollisionBaseline(vfBeam, beam);
         this.applyBeamCollisionOffset(beam, baseline, 0);
 
         let bestOffset: number = 0;
-        let bestScore: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, 0);
+        let bestScore: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, stemSamples, 0);
         for (const extensionOffset of [2, 4, 6, 8, 10, 12]) {
-            const score: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, extensionOffset);
+            const score: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, stemSamples, extensionOffset);
             if (score < bestScore) {
                 bestScore = score;
                 bestOffset = extensionOffset;
@@ -2192,6 +2343,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
         beam: any,
         baseline: BeamCollisionBaseline,
         noteheadSamples: NoteheadCollisionSample[],
+        stemSamples: StemCollisionSample[],
         extensionOffset: number
     ): number {
         if (!beam.notes?.length) {
@@ -2235,6 +2387,26 @@ export class VexFlowMeasure extends GraphicalMeasure {
             const comfortZone: number = sample.radius + 2;
             if (distanceToBand < comfortZone) {
                 score += (comfortZone - distanceToBand) * 4;
+            }
+        }
+        for (const sample of stemSamples) {
+            if (sample.x < minX || sample.x > maxX || beamNotes.has(sample.staveNote)) {
+                continue;
+            }
+            const beamLineY: number = beam.getSlopeY(sample.x, firstStemX, shiftedBeamY, beam.slope);
+            if (!Number.isFinite(beamLineY)) {
+                continue;
+            }
+            const bandMin: number = Math.min(beamLineY, beamLineY + beamBandHeight) - 0.7;
+            const bandMax: number = Math.max(beamLineY, beamLineY + beamBandHeight) + 0.7;
+            const intersectsStem: boolean = sample.bottomY >= bandMin && sample.topY <= bandMax;
+            if (intersectsStem) {
+                score += 18;
+                continue;
+            }
+            const distanceToStem: number = sample.bottomY < bandMin ? bandMin - sample.bottomY : sample.topY - bandMax;
+            if (distanceToStem >= 0 && distanceToStem < 2.5) {
+                score += (2.5 - distanceToStem) * 3;
             }
         }
         return score;

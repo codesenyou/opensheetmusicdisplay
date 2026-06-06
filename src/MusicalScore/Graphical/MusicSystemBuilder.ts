@@ -152,10 +152,11 @@ export class MusicSystemBuilder {
             const measureFitsInSystem: boolean =
                 this.currentSystemParams.currentWidth + totalMeasureWidth + nextMeasureBeginInstructionWidth + labelWidth < systemMaxWidth;
             const doXmlPageBreak: boolean = this.rules.NewPageAtXMLNewPageAttribute && sourceMeasure.printNewPageXml;
-            const impliedSystemBreak: boolean = doXmlPageBreak || // also create new system if doing page break
+            const impliedXmlSystemBreak: boolean = doXmlPageBreak || // also create new system if doing page break
                 (this.rules.NewSystemAtXMLNewPageAttribute && sourceMeasure.printNewPageXml);
-            const doXmlLineBreak: boolean = impliedSystemBreak ||
-                (this.rules.NewSystemAtXMLNewSystemAttribute && sourceMeasure.printNewSystemXml) ||
+            const doXmlLineBreak: boolean = impliedXmlSystemBreak ||
+                (this.rules.NewSystemAtXMLNewSystemAttribute && sourceMeasure.printNewSystemXml);
+            const doForcedMeasureCountBreak: boolean =
                 currentMeasureNumberInSystem === this.rules.RenderXMeasuresPerLineAkaSystem && currentMeasureNumberInSystem > 0;
             const canPreserveXmlSystemLayout: boolean = this.canPreserveXmlSystemLayout(
                 doXmlLineBreak,
@@ -165,7 +166,10 @@ export class MusicSystemBuilder {
                 labelWidth,
                 systemMaxWidth
             );
-            if (isSystemStartMeasure || ((measureFitsInSystem || canPreserveXmlSystemLayout) && !doXmlLineBreak)) {
+            const shouldBreakSystem: boolean = doForcedMeasureCountBreak ||
+                (!measureFitsInSystem && !canPreserveXmlSystemLayout) ||
+                (doXmlLineBreak && !measureFitsInSystem && !canPreserveXmlSystemLayout);
+            if (isSystemStartMeasure || !shouldBreakSystem) {
                 this.addMeasureToSystem(
                     graphicalMeasures, measureStartLine, measureEndLine, totalMeasureWidth,
                     currentMeasureBeginInstructionsWidth, currentMeasureVarWidth, currentMeasureEndInstructionsWidth

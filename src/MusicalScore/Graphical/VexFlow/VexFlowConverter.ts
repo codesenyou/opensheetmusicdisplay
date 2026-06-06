@@ -277,7 +277,6 @@ export class VexFlowConverter {
         let alignCenter: boolean = false;
         let xShift: number = 0;
         let isRest: boolean = false;
-        let restYPitch: Pitch;
         for (const note of notes) {
             if (numDots < note.numberOfDots) {
                 numDots = note.numberOfDots;
@@ -344,79 +343,11 @@ export class VexFlowConverter {
                     xShift = rules.WholeRestXShiftVexflow * unitInPixels; // TODO find way to make dependent on the modifiers
                     // affects VexFlowStaffEntry.calculateXPosition()
                 }
-                //If we have more than one visible voice entry, shift the rests so no collision occurs
+                // If we have more than one visible voice entry, shift rests by bounded staff-line steps.
+                // Never derive rest height from neighboring pitches: extreme cross-staff notes can otherwise
+                // place rests outside the measure or even between systems.
                 if (note.sourceNote.ParentStaff.Voices.length > 1) {
-                    const staffGves: GraphicalVoiceEntry[] = note.parentVoiceEntry.parentStaffEntry.graphicalVoiceEntries;
-                    //Find all visible voice entries (don't want invisible rests/notes causing visible shift)
-                    const restVoiceId: number = note.parentVoiceEntry.parentVoiceEntry.ParentVoice.VoiceId;
-                    let maxHalftone: number;
-                    let linesShift: number;
-                    for (const staffGve of staffGves) {
-                        for (const gveNote of staffGve.notes) {
-                            if (gveNote === note || gveNote.sourceNote.isRest() || !gveNote.sourceNote.PrintObject) {
-                                continue;
-                            }
-                            // unfortunately, we don't have functional note bounding boxes at this point,
-                            //   so we have to infer the note positions and sizes manually.
-                            const wantedStemDirection: StemDirectionType = gveNote.parentVoiceEntry.parentVoiceEntry.WantedStemDirection;
-                            const isUpperVoiceRest: boolean = restVoiceId === 1 || restVoiceId === 5;
-                            const lineShiftDirection: number = isUpperVoiceRest ? 1 : -1; // voice 1: put rest above (-y). other voices: below
-                            const gveNotePitch: Pitch = gveNote.sourceNote.Pitch;
-                            const noteHalftone: number = gveNotePitch.getHalfTone();
-                            const newHigh: boolean = lineShiftDirection === 1 && noteHalftone > maxHalftone;
-                            const newLow: boolean = lineShiftDirection === -1 && noteHalftone < maxHalftone;
-                            if (!maxHalftone || newHigh || newLow) {
-                                maxHalftone = noteHalftone;
-                                linesShift = 0;
-                                // add stem length if necessary
-                                if (isUpperVoiceRest && wantedStemDirection === StemDirectionType.Up) {
-                                    linesShift += 7; // rest should be above notes with up stem
-                                } else if (!isUpperVoiceRest && wantedStemDirection === StemDirectionType.Down) {
-                                    linesShift += 7; // rest should be below notes with down stem
-                                } else if (isUpperVoiceRest) {
-                                    linesShift += 1;
-                                } else {
-                                    linesShift += 2;
-                                }
-                                if (!duration.includes("8")) { // except for 8th rests, rests are middle-aligned in vexflow (?)
-                                    //linesShift += 3;
-                                    if (wantedStemDirection === StemDirectionType.Up && lineShiftDirection === -1) {
-                                        linesShift += 1; // quarter rests need a little more below upwards stems. over downwards stems it's fine.
-                                    }
-                                }
-                                if (gveNote.sourceNote.NoteBeam) {
-                                    linesShift += 1; // TODO this is of course rather a workaround, but the beams aren't completed yet here.
-                                    // instead, we could calculate how many lines are between the notes of the beam,
-                                    //   and which stem of which note is longer, so its rest needs that many lines more.
-                                    //   this is more of "reverse engineering" or rather "advance engineering" the graphical notes,
-                                    //   which are unfortunately not built/drawn yet here.
-                                }
-                                if (duration.includes("w")) {
-                                    linesShift /= 2; // TODO maybe a different fix, whole notes may need another look
-                                }
-                                linesShift += (Math.ceil(rules.RestCollisionYPadding) * 0.5); // 0.5 is smallest unit
-                                linesShift *= lineShiftDirection;
-                                note.lineShift = linesShift;
-                            }
-                        }
-                    }
-                    if (maxHalftone > 0) {
-                        let octaveOffset: number = 3;
-                        const restClefInstruction: ClefInstruction = (note as VexFlowGraphicalNote).Clef();
-                        switch (restClefInstruction.ClefType) {
-                            case ClefEnum.F:
-                                octaveOffset = 5;
-                                break;
-                            case ClefEnum.C:
-                                octaveOffset = 4;
-                                // if (restClefInstruction.Line == 4) // tenor clef quarter rests can be off
-                                break;
-                            default:
-                                break;
-                        }
-                        restYPitch = Pitch.fromHalftone(maxHalftone);
-                        keys = [VexFlowConverter.pitch(restYPitch, true, restClefInstruction, undefined, octaveOffset)[0]];
-                    }
+                    note.lineShift = VexFlowConverter.getBoundedRestLineShift(note, duration, rules);
                 }
                 // vfClefType seems to be undefined for rest notes, but setting it seems to break rest positioning.
                 // if (!vfClefType) {
@@ -587,9 +518,12 @@ export class VexFlowConverter {
                 }
             }
         }
-        const lineShift: number = gve.notes[0].lineShift;
+        const lineShift: number = VexFlowConverter.getSafeLineShift(gve.notes[0]);
         if (lineShift !== 0) {
             vfnote.getKeyProps()[0].line += lineShift;
+        }
+        if (isRest) {
+            VexFlowConverter.clampRestKeyProps(vfnote);
         }
         // check for slash noteheads (among other noteheads)
         if (notes.length > 1) {
@@ -707,6 +641,66 @@ export class VexFlowConverter {
             vfnote.addDotToAll();
         }
         return vfnote;
+    }
+
+    private static getBoundedRestLineShift(restNote: GraphicalNote, duration: string, rules: EngravingRules): number {
+        const voiceEntries: GraphicalVoiceEntry[] = restNote.parentVoiceEntry?.parentStaffEntry?.graphicalVoiceEntries ?? [];
+        const collidingNotes: GraphicalNote[] = [];
+        for (const voiceEntry of voiceEntries) {
+            for (const candidate of voiceEntry.notes) {
+                if (candidate === restNote || candidate.sourceNote.isRest() || !candidate.sourceNote.PrintObject) {
+                    continue;
+                }
+                collidingNotes.push(candidate);
+            }
+        }
+        if (collidingNotes.length === 0) {
+            return 0;
+        }
+
+        const voiceId: number = restNote.parentVoiceEntry?.parentVoiceEntry?.ParentVoice?.VoiceId ?? 0;
+        const shiftDirection: number = VexFlowConverter.restBelongsToUpperVoice(voiceId) ? 1 : -1;
+        const hasBeam: boolean = collidingNotes.some((candidate: GraphicalNote) => !!candidate.sourceNote.NoteBeam);
+        const againstSameDirectionStem: boolean = collidingNotes.some((candidate: GraphicalNote) =>
+            candidate.parentVoiceEntry?.parentVoiceEntry?.WantedStemDirection ===
+            (shiftDirection > 0 ? StemDirectionType.Up : StemDirectionType.Down)
+        );
+        const padding: number = Math.ceil(rules.RestCollisionYPadding) * 0.5;
+        let magnitude: number = duration.includes("w") ? 1.25 : duration.includes("8") ? 2.0 : 2.5;
+        if (hasBeam) {
+            magnitude += 0.5;
+        }
+        if (againstSameDirectionStem) {
+            magnitude += 0.5;
+        }
+        magnitude += padding;
+        return VexFlowConverter.clampRestLineShift(magnitude * shiftDirection);
+    }
+
+    private static restBelongsToUpperVoice(voiceId: number): boolean {
+        return voiceId === 1 || voiceId === 5 || (voiceId > 0 && voiceId % 2 === 1);
+    }
+
+    private static getSafeLineShift(note: GraphicalNote): number {
+        if (!note.sourceNote.isRest()) {
+            return note.lineShift;
+        }
+        return VexFlowConverter.clampRestLineShift(note.lineShift);
+    }
+
+    private static clampRestLineShift(lineShift: number): number {
+        if (!Number.isFinite(lineShift)) {
+            return 0;
+        }
+        return Math.max(-4, Math.min(4, lineShift));
+    }
+
+    private static clampRestKeyProps(vfnote: VF.StaveNote): void {
+        const keyProps: any[] = vfnote.getKeyProps?.() ?? [];
+        if (!keyProps[0] || !Number.isFinite(keyProps[0].line)) {
+            return;
+        }
+        keyProps[0].line = Math.max(-1, Math.min(5, keyProps[0].line));
     }
 
     public static generateArticulations(vfnote: VF.StemmableNote, gNote: GraphicalNote,
