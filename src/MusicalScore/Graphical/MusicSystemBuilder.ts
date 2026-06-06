@@ -30,6 +30,7 @@ export class MusicSystemBuilder {
     protected rules: EngravingRules;
     protected measureListIndex: number;
     protected musicSystems: MusicSystem[] = [];
+    protected hasXmlSystemLayout: boolean = false;
 
     /**
      * Does the mapping from the currently visible staves to the global staff-list of the music sheet.
@@ -52,6 +53,10 @@ export class MusicSystemBuilder {
         this.activeKeys = new Array(this.numberOfVisibleStaffLines);
         this.activeClefs = new Array(this.numberOfVisibleStaffLines);
         this.initializeActiveInstructions(this.measureList[0]);
+        this.hasXmlSystemLayout = this.measureList.some((measures: GraphicalMeasure[]) => {
+            const sourceMeasure: SourceMeasure = measures?.[0]?.parentSourceMeasure;
+            return !!sourceMeasure && (sourceMeasure.printNewSystemXml || sourceMeasure.printNewPageXml);
+        });
     }
 
     public buildMusicSystems(): MusicSystem[] {
@@ -152,7 +157,15 @@ export class MusicSystemBuilder {
             const doXmlLineBreak: boolean = impliedSystemBreak ||
                 (this.rules.NewSystemAtXMLNewSystemAttribute && sourceMeasure.printNewSystemXml) ||
                 currentMeasureNumberInSystem === this.rules.RenderXMeasuresPerLineAkaSystem && currentMeasureNumberInSystem > 0;
-            if (isSystemStartMeasure || (measureFitsInSystem && !doXmlLineBreak)) {
+            const canPreserveXmlSystemLayout: boolean = this.canPreserveXmlSystemLayout(
+                doXmlLineBreak,
+                currentMeasureBeginInstructionsWidth,
+                currentMeasureEndInstructionsWidth,
+                currentMeasureVarWidth,
+                labelWidth,
+                systemMaxWidth
+            );
+            if (isSystemStartMeasure || ((measureFitsInSystem || canPreserveXmlSystemLayout) && !doXmlLineBreak)) {
                 this.addMeasureToSystem(
                     graphicalMeasures, measureStartLine, measureEndLine, totalMeasureWidth,
                     currentMeasureBeginInstructionsWidth, currentMeasureVarWidth, currentMeasureEndInstructionsWidth
@@ -187,6 +200,38 @@ export class MusicSystemBuilder {
             this.finalizeCurrentAndCreateNewSystem(this.measureList[this.measureList.length - 1], !this.rules.StretchLastSystemLine, false);
         }
         return this.musicSystems;
+    }
+
+    protected canPreserveXmlSystemLayout(
+        currentMeasureStartsXmlSystem: boolean,
+        currentMeasureBeginInstructionsWidth: number,
+        currentMeasureEndInstructionsWidth: number,
+        currentMeasureVarWidth: number,
+        labelWidth: number,
+        systemMaxWidth: number
+    ): boolean {
+        if (currentMeasureStartsXmlSystem || !this.isRespectingXmlSystemLayout() || this.currentSystemParams.IsSystemStartMeasure()) {
+            return false;
+        }
+
+        const systemFixWidth: number = this.currentSystemParams.currentSystemFixWidth +
+            currentMeasureBeginInstructionsWidth + currentMeasureEndInstructionsWidth;
+        const systemVarWidth: number = this.currentSystemParams.currentSystemVarWidth + currentMeasureVarWidth;
+        if (systemVarWidth <= 0) {
+            return false;
+        }
+
+        const availableVariableWidth: number = systemMaxWidth - labelWidth - systemFixWidth;
+        const requiredScale: number = availableVariableWidth / systemVarWidth;
+        return requiredScale >= this.rules.MusicXMLSystemLayoutMinXScale;
+    }
+
+    protected isRespectingXmlSystemLayout(): boolean {
+        return this.hasXmlSystemLayout && (
+            this.rules.NewSystemAtXMLNewSystemAttribute ||
+            this.rules.NewSystemAtXMLNewPageAttribute ||
+            this.rules.NewPageAtXMLNewPageAttribute
+        );
     }
 
     /**

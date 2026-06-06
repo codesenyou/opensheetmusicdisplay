@@ -504,6 +504,8 @@ export class EngravingRules {
      * */
     public NewSystemAtXMLNewPageAttribute: boolean;
     public NewPageAtXMLNewPageAttribute: boolean;
+    /** Minimum horizontal scale when preserving MusicXML system grouping. Smaller viewports reflow automatically. */
+    public MusicXMLSystemLayoutMinXScale: number;
     /** Force OSMD to render only x measures per line/system, creating line breaks / system breaks. Disabled if set to 0. */
     public RenderXMeasuresPerLineAkaSystem: number;
     public PageFormat: PageFormat;
@@ -960,6 +962,7 @@ export class EngravingRules {
         this.NewSystemAtXMLNewSystemAttribute = false;
         this.NewPageAtXMLNewPageAttribute = false;
         this.NewSystemAtXMLNewPageAttribute = false;
+        this.MusicXMLSystemLayoutMinXScale = 0.7;
         this.RenderXMeasuresPerLineAkaSystem = 0;
         this.RestoreCursorAfterRerender = true;
         this.StretchLastSystemLine = false;
