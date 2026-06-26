@@ -2016,19 +2016,19 @@ export class VexFlowMeasure extends GraphicalMeasure {
         try {
             box = typeof element?.getBoundingBox === "function" ? element.getBoundingBox() : element?.boundingBox;
         } catch (e) {
-            return undefined;
+            return this.getVexFlowAttachedModifierFallbackRect(element);
         }
-        if (!box) {
-            return undefined;
+        if (box) {
+            const x: number = typeof box.getX === "function" ? box.getX() : box.x;
+            const y: number = typeof box.getY === "function" ? box.getY() : box.y;
+            const width: number = typeof box.getW === "function" ? box.getW() : box.w ?? box.width;
+            const height: number = typeof box.getH === "function" ? box.getH() : box.h ?? box.height;
+            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(width) && Number.isFinite(height) &&
+                Math.abs(width) > 0.01 && Math.abs(height) > 0.01) {
+                return { x, y, width, height };
+            }
         }
-        const x: number = typeof box.getX === "function" ? box.getX() : box.x;
-        const y: number = typeof box.getY === "function" ? box.getY() : box.y;
-        const width: number = typeof box.getW === "function" ? box.getW() : box.w ?? box.width;
-        const height: number = typeof box.getH === "function" ? box.getH() : box.h ?? box.height;
-        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
-            return undefined;
-        }
-        return { x, y, width, height };
+        return this.getVexFlowAttachedModifierFallbackRect(element);
     }
 
     private registerRepeatDotCollisionBoxes(barline: any): void {
@@ -2313,33 +2313,372 @@ export class VexFlowMeasure extends GraphicalMeasure {
         return CollisionBoxKind.GenericBoundingBox;
     }
 
+    private getVexFlowAttachedModifierFallbackRect(modifier: any): CollisionRect {
+        const category: string = this.getVexFlowElementCategory(modifier);
+        if (category === "articulations") {
+            return this.getArticulationCollisionRectPx(modifier);
+        }
+        if (category === "ornaments") {
+            return this.getOrnamentCollisionRectPx(modifier);
+        }
+        return undefined;
+    }
+
+    private getArticulationCollisionRectPx(articulation: any): CollisionRect {
+        const note: any = typeof articulation?.getNote === "function" ? articulation.getNote() : articulation?.note;
+        const index: number = Number(typeof articulation?.getIndex === "function" ? articulation.getIndex() : articulation?.index);
+        const position: number = this.getVexFlowModifierPosition(articulation);
+        const positions: any = this.getVexFlowModifierPositions();
+        const stave: any = typeof note?.getStave === "function" ? note.getStave() : note?.stave;
+        if (!note || !stave || !Number.isFinite(index) || !Number.isFinite(position)) {
+            return undefined;
+        }
+
+        const metrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(articulation?.glyph, articulation);
+        const width: number = Math.max(metrics.width, Number(articulation?.getWidth?.() ?? articulation?.width ?? 0), 4);
+        const height: number = Math.max(metrics.height, 4);
+        const start: any = typeof note.getModifierStartXY === "function"
+            ? note.getModifierStartXY(position, index)
+            : undefined;
+        if (!start || !Number.isFinite(start.x)) {
+            return undefined;
+        }
+
+        let x: number = start.x;
+        if (articulation?.type === "abr") {
+            x += this.getBreathMarkXShiftPx(articulation, note, stave);
+        }
+        const xShift: number = Number(typeof articulation.getXShift === "function" ? articulation.getXShift() : articulation.x_shift);
+        if (Number.isFinite(xShift)) {
+            x += xShift;
+        }
+
+        const staffSpace: number = Number(stave.getSpacingBetweenLines?.() ?? unitInPixels);
+        const textLine: number = Number(articulation.text_line ?? 0);
+        const canSitBetweenLines: boolean = articulation?.articulation?.between_lines === true;
+        const isTab: boolean = note.getCategory?.() === "tabnotes";
+        const shouldSitOutsideStaff: boolean = !canSitBetweenLines || isTab;
+        const initialOffset: number = this.getArticulationInitialOffset(note, position);
+        let y: number;
+        if (position === positions.ABOVE) {
+            const topY: number = this.getAttachedModifierTopYPx(note, textLine);
+            y = topY - ((textLine + initialOffset) * staffSpace);
+            if (shouldSitOutsideStaff) {
+                y = Math.min(Number(stave.getYForTopText?.(-0.5) ?? y), y);
+            }
+        } else if (position === positions.BELOW) {
+            const bottomY: number = this.getAttachedModifierBottomYPx(note, textLine);
+            y = bottomY + ((textLine + initialOffset) * staffSpace);
+            if (shouldSitOutsideStaff) {
+                y = Math.max(Number(stave.getYForBottomText?.(-0.5) ?? y), y);
+            }
+        } else {
+            const ys: number[] = typeof note.getYs === "function" ? note.getYs() : [];
+            y = Array.isArray(ys) && Number.isFinite(ys[index]) ? ys[index] : start.y;
+        }
+        const yShift: number = Number(articulation.y_shift ?? 0);
+        if (Number.isFinite(yShift)) {
+            y += yShift;
+        }
+
+        let originY: number = position === positions.ABOVE ? 1 : 0;
+        if (!isTab && (position === positions.ABOVE || position === positions.BELOW) && Array.isArray(note.getYs?.())) {
+            const ys: number[] = note.getYs();
+            const keyProps: any[] = typeof note.getKeyProps === "function" ? note.getKeyProps() : note.keyProps;
+            const noteLine: number = Number(keyProps?.[index]?.line);
+            if (Number.isFinite(ys[index]) && Number.isFinite(noteLine) && Number.isFinite(staffSpace) && staffSpace !== 0) {
+                const offsetDirection: number = position === positions.ABOVE ? -1 : 1;
+                const distanceFromNote: number = (ys[index] - y) / staffSpace;
+                const articLine: number = distanceFromNote + noteLine;
+                const snappedLine: number = this.snapArticulationLineToStaff(canSitBetweenLines, articLine, position, offsetDirection);
+                if (this.articulationLineIsWithinStaff(snappedLine, position)) {
+                    originY = 0.5;
+                }
+                y += Math.abs(snappedLine - articLine) * staffSpace * offsetDirection;
+            }
+        }
+
+        const top: number = y - (height * originY);
+        return this.normalizePxRect({
+            x: x - width / 2,
+            y: top,
+            width,
+            height,
+        }, 1.5);
+    }
+
+    private getOrnamentCollisionRectPx(ornament: any): CollisionRect {
+        const note: any = typeof ornament?.getNote === "function" ? ornament.getNote() : ornament?.note;
+        const index: number = Number(typeof ornament?.getIndex === "function" ? ornament.getIndex() : ornament?.index);
+        const position: number = this.getVexFlowModifierPosition(ornament);
+        const stave: any = typeof note?.getStave === "function" ? note.getStave() : note?.stave;
+        if (!note || !stave || !Number.isFinite(index) || !Number.isFinite(position)) {
+            return undefined;
+        }
+
+        const start: any = typeof note.getModifierStartXY === "function"
+            ? note.getModifierStartXY(position, index)
+            : undefined;
+        if (!start || !Number.isFinite(start.x)) {
+            return undefined;
+        }
+
+        const stemDirection: number = this.getNoteStemDirection(note);
+        const stemExtents: any = this.getNoteStemExtents(note);
+        const spacing: number = Number(stave.getSpacingBetweenLines?.() ?? unitInPixels);
+        const textLine: number = Number(ornament.text_line ?? 0);
+        const isStemDown: boolean = stemDirection === this.getVexFlowStemDown();
+        let baseY: number = isStemDown ? Number(stemExtents?.baseY) : Number(stemExtents?.topY);
+        if (!Number.isFinite(baseY)) {
+            const ys: number[] = typeof note.getYs === "function" ? note.getYs() : [];
+            baseY = Array.isArray(ys) && ys.length > 0 ? Math.min(...ys.filter((yValue: number) => Number.isFinite(yValue))) : start.y;
+        }
+
+        if (note.getCategory?.() === "tabnotes") {
+            if (typeof note.hasStem === "function" && note.hasStem()) {
+                if (isStemDown) {
+                    baseY = Number(stave.getYForTopText?.(textLine) ?? baseY);
+                }
+            } else {
+                baseY = Number(stave.getYForTopText?.(textLine) ?? baseY);
+            }
+        }
+
+        const isPlacedOnNoteheadSide: boolean = isStemDown;
+        let lineSpacing: number = 1;
+        if (!isPlacedOnNoteheadSide && note.beam) {
+            lineSpacing += 0.5;
+        }
+        if (ornament?.ornament?.smuflGlyph && isPlacedOnNoteheadSide) {
+            lineSpacing += 0.4;
+        }
+
+        let glyphX: number = start.x;
+        if (ornament.delayed) {
+            glyphX += this.getDelayedOrnamentXShiftPx(ornament, note, stave);
+        }
+        const glyphYBetweenLines: number = baseY - (spacing * (textLine + lineSpacing));
+        let glyphY: number = Math.min(Number(stave.getYForTopText?.(textLine) ?? glyphYBetweenLines), glyphYBetweenLines);
+        const yShift: number = Number(ornament.y_shift ?? 0);
+        if (Number.isFinite(yShift)) {
+            glyphY += yShift;
+        }
+
+        const ornamentMetrics: { width: number, height: number } = this.getOrnamentGlyphMetrics(ornament);
+        const lowerMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(ornament.accidentalLower, undefined);
+        const upperMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(ornament.accidentalUpper, undefined);
+        const lowerPadding: number = Number(ornament.render_options?.accidentalLowerPadding ?? 3);
+        const upperPadding: number = Number(ornament.render_options?.accidentalUpperPadding ?? 3);
+        const hasLower: boolean = lowerMetrics.width > 0.01 && lowerMetrics.height > 0.01;
+        const hasUpper: boolean = upperMetrics.width > 0.01 && upperMetrics.height > 0.01;
+        const width: number = Math.max(
+            ornamentMetrics.width,
+            hasLower ? lowerMetrics.width : 0,
+            hasUpper ? upperMetrics.width : 0,
+            Number(ornament?.getWidth?.() ?? ornament?.width ?? 0),
+            5
+        );
+        const height: number =
+            (hasLower ? lowerMetrics.height + lowerPadding : 0) +
+            Math.max(ornamentMetrics.height, 5) +
+            (hasUpper ? upperPadding + upperMetrics.height : 0);
+
+        return this.normalizePxRect({
+            x: glyphX - width / 2,
+            y: glyphY - height,
+            width,
+            height,
+        }, 1.5);
+    }
+
+    private getVexFlowModifierPositions(): any {
+        return (VF.Modifier as any)?.Position ?? { LEFT: 1, RIGHT: 2, ABOVE: 3, BELOW: 4 };
+    }
+
+    private getVexFlowModifierPosition(modifier: any): number {
+        return Number(typeof modifier?.getPosition === "function" ? modifier.getPosition() : modifier?.position);
+    }
+
+    private getVexFlowStemUp(): number {
+        return Number((VF.Stem as any)?.UP ?? 1);
+    }
+
+    private getVexFlowStemDown(): number {
+        return Number((VF.Stem as any)?.DOWN ?? -1);
+    }
+
+    private getNoteStemDirection(note: any): number {
+        const direction: number = Number(typeof note?.getStemDirection === "function" ? note.getStemDirection() : note?.stem_direction);
+        return Number.isFinite(direction) ? direction : this.getVexFlowStemUp();
+    }
+
+    private getNoteStemExtents(note: any): { topY?: number, baseY?: number } {
+        try {
+            if (typeof note?.getStemExtents === "function") {
+                return note.getStemExtents();
+            }
+            const stem: any = typeof note?.getStem === "function" ? note.getStem() : note?.stem;
+            if (typeof stem?.getExtents === "function") {
+                return stem.getExtents();
+            }
+        } catch (e) {
+            return {};
+        }
+        return {};
+    }
+
+    private getAttachedModifierTopYPx(note: any, textLine: number): number {
+        const stave: any = typeof note?.getStave === "function" ? note.getStave() : note?.stave;
+        const stemDirection: number = this.getNoteStemDirection(note);
+        const stemExtents: any = this.getNoteStemExtents(note);
+        if (note.getCategory?.() === "tabnotes") {
+            if (typeof note.hasStem === "function" && note.hasStem() && stemDirection === this.getVexFlowStemUp()) {
+                return Number(stemExtents?.topY);
+            }
+            return Number(stave?.getYForTopText?.(textLine));
+        }
+        if (typeof note.hasStem === "function" && note.hasStem()) {
+            return stemDirection === this.getVexFlowStemUp()
+                ? Number(stemExtents?.topY)
+                : Number(stemExtents?.baseY);
+        }
+        const ys: number[] = typeof note.getYs === "function" ? note.getYs() : [];
+        return Array.isArray(ys) && ys.length > 0 ? Math.min(...ys.filter((yValue: number) => Number.isFinite(yValue))) : undefined;
+    }
+
+    private getAttachedModifierBottomYPx(note: any, textLine: number): number {
+        const stave: any = typeof note?.getStave === "function" ? note.getStave() : note?.stave;
+        const stemDirection: number = this.getNoteStemDirection(note);
+        const stemExtents: any = this.getNoteStemExtents(note);
+        if (note.getCategory?.() === "tabnotes") {
+            if (typeof note.hasStem === "function" && note.hasStem() && stemDirection === this.getVexFlowStemDown()) {
+                return Number(stemExtents?.topY);
+            }
+            return Number(stave?.getYForBottomText?.(textLine));
+        }
+        if (typeof note.hasStem === "function" && note.hasStem()) {
+            return stemDirection === this.getVexFlowStemUp()
+                ? Number(stemExtents?.baseY)
+                : Number(stemExtents?.topY);
+        }
+        const ys: number[] = typeof note.getYs === "function" ? note.getYs() : [];
+        return Array.isArray(ys) && ys.length > 0 ? Math.max(...ys.filter((yValue: number) => Number.isFinite(yValue))) : undefined;
+    }
+
+    private getArticulationInitialOffset(note: any, position: number): number {
+        const positions: any = this.getVexFlowModifierPositions();
+        const isOnStemTip: boolean =
+            (position === positions.ABOVE && this.getNoteStemDirection(note) === this.getVexFlowStemUp()) ||
+            (position === positions.BELOW && this.getNoteStemDirection(note) === this.getVexFlowStemDown());
+        if (note.getCategory?.() === "stavenotes" || note.getCategory?.() === "gracenotes") {
+            return typeof note.hasStem === "function" && note.hasStem() && isOnStemTip ? 0.5 : 1;
+        }
+        return typeof note.hasStem === "function" && note.hasStem() && isOnStemTip ? 1 : 0;
+    }
+
+    private articulationLineIsWithinStaff(line: number, position: number): boolean {
+        const positions: any = this.getVexFlowModifierPositions();
+        return position === positions.ABOVE ? line <= 5 : line >= 1;
+    }
+
+    private snapArticulationLineToStaff(canSitBetweenLines: boolean, line: number, position: number, offsetDirection: number): number {
+        const roundToNearestHalf: (mathFn: (value: number) => number, value: number) => number =
+            (mathFn: (value: number) => number, value: number): number => mathFn(value / 0.5) * 0.5;
+        const positions: any = this.getVexFlowModifierPositions();
+        const roundingFunction: (value: number) => number = this.articulationLineIsWithinStaff(line, position)
+            ? position === positions.ABOVE ? Math.ceil : Math.floor
+            : Math.round;
+        const snappedLine: number = roundToNearestHalf(roundingFunction, line);
+        const canSnapToStaffSpace: boolean = canSitBetweenLines && this.articulationLineIsWithinStaff(snappedLine, position);
+        return canSnapToStaffSpace && snappedLine % 1 === 0 ? snappedLine + (0.5 * -offsetDirection) : snappedLine;
+    }
+
+    private getBreathMarkXShiftPx(articulation: any, note: any, stave: any): number {
+        const breathMarkDistance: number = Number(articulation.breathMarkDistance ?? 0.8);
+        const noteTickContext: any = typeof note.getTickContext === "function" ? note.getTickContext() : note.tickContext;
+        const nextContext: any = (VF.TickContext as any)?.getNextContext?.(noteTickContext);
+        const noteX: number = Number(noteTickContext?.getX?.() ?? noteTickContext?.x ?? note?.getX?.());
+        if (!Number.isFinite(noteX)) {
+            return 0;
+        }
+        if (nextContext && Number(nextContext.x) > Number(noteTickContext?.x)) {
+            return (Number(nextContext.getX?.() ?? nextContext.x) - noteX) * breathMarkDistance;
+        }
+        return (Number(stave.getX?.() ?? stave.x ?? 0) + Number(stave.getWidth?.() ?? stave.width ?? 0) -
+            noteX + Number(stave.start_x ?? 0)) * breathMarkDistance;
+    }
+
+    private getDelayedOrnamentXShiftPx(ornament: any, note: any, stave: any): number {
+        if (Number.isFinite(ornament.delayXShift)) {
+            return ornament.delayXShift;
+        }
+        const width: number = Math.max(this.getOrnamentGlyphMetrics(ornament).width, 0);
+        let delayXShift: number = width / 2;
+        const noteTickContext: any = typeof note.getTickContext === "function" ? note.getTickContext() : note.tickContext;
+        const nextContext: any = (VF.TickContext as any)?.getNextContext?.(noteTickContext);
+        const noteX: number = Number(noteTickContext?.getX?.() ?? noteTickContext?.x ?? note?.getX?.());
+        if (nextContext && Number.isFinite(noteX)) {
+            delayXShift += (Number(nextContext.getX?.() ?? nextContext.x) - noteX) * 0.5;
+        } else {
+            const staveEnd: number = Number(stave.x ?? stave.getX?.() ?? 0) + Number(stave.width ?? stave.getWidth?.() ?? 0);
+            const startX: number = Number.isFinite(noteX) ? noteX : Number(note?.getAbsoluteX?.() ?? 0);
+            delayXShift += (staveEnd - startX) * 0.5;
+        }
+        ornament.delayXShift = delayXShift;
+        return delayXShift;
+    }
+
+    private getVexFlowGlyphMetrics(glyph: any, owner: any): { width: number, height: number } {
+        if (!glyph) {
+            return { width: 0, height: 0 };
+        }
+        const metrics: any = typeof glyph.getMetrics === "function" ? glyph.getMetrics() : glyph.metrics;
+        const width: number = Number(metrics?.width ?? glyph.width ?? owner?.getWidth?.() ?? owner?.width ?? 0);
+        const height: number = Number(metrics?.height ?? glyph.height ?? owner?.render_options?.font_scale ?? 0);
+        return {
+            width: Number.isFinite(width) ? width : 0,
+            height: Number.isFinite(height) ? height : 0,
+        };
+    }
+
+    private getOrnamentGlyphMetrics(ornament: any): { width: number, height: number } {
+        const glyphMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(ornament?.glyph, ornament);
+        if (ornament?.ornament?.smuflGlyph) {
+            const fontSize: number = Number(ornament.render_options?.font_scale ?? 38) * 0.92 *
+                Number(ornament.ornament?.smuflScale ?? 1);
+            return {
+                width: Math.max(Number(ornament?.getWidth?.() ?? ornament?.width ?? 0), glyphMetrics.width, fontSize * 0.7),
+                height: Number.isFinite(fontSize) ? fontSize : Math.max(glyphMetrics.height, 10),
+            };
+        }
+        return glyphMetrics;
+    }
+
+    private normalizePxRect(rect: CollisionRect, padding: number = 0): CollisionRect {
+        const x1: number = Math.min(rect.x, rect.x + rect.width) - padding;
+        const x2: number = Math.max(rect.x, rect.x + rect.width) + padding;
+        const y1: number = Math.min(rect.y, rect.y + rect.height) - padding;
+        const y2: number = Math.max(rect.y, rect.y + rect.height) + padding;
+        if (!Number.isFinite(x1) || !Number.isFinite(x2) || !Number.isFinite(y1) || !Number.isFinite(y2)) {
+            return undefined;
+        }
+        return {
+            x: x1,
+            y: y1,
+            width: x2 - x1,
+            height: y2 - y1,
+        };
+    }
+
     private registerBeamCollisionBox(vfBeam: VF.Beam): void {
         const collisionModel: CollisionModel = this.getCollisionModel();
         const beam: any = vfBeam as any;
         if (!collisionModel || !beam?.notes?.length) {
             return;
         }
-        const stemXs: number[] = beam.notes.map((note: any) => note?.getStemX?.()).filter((x: number) => Number.isFinite(x));
-        if (stemXs.length < 2) {
-            return;
+        for (const rect of this.getBeamCollisionRectsPx(beam)) {
+            collisionModel.registerRect(this.rectPxToUnit(rect), CollisionBoxKind.Beam, vfBeam, vfBeam);
         }
-        const minX: number = Math.min(...stemXs);
-        const maxX: number = Math.max(...stemXs);
-        const firstNote: any = beam.notes[0];
-        const firstStemX: number = firstNote.getStemX();
-        const beamY: number = beam.getBeamYToDraw();
-        const beamThickness: number = Math.max(beam.render_options?.beam_width ?? 5, 3);
-        const beamBandHeight: number = beamThickness * (((beam.beam_count ?? 1) - 1) * 1.5 + 1);
-        const yAtMin: number = beam.getSlopeY(minX, firstStemX, beamY, beam.slope);
-        const yAtMax: number = beam.getSlopeY(maxX, firstStemX, beamY, beam.slope);
-        const top: number = Math.min(yAtMin, yAtMax, yAtMin + beamBandHeight, yAtMax + beamBandHeight);
-        const bottom: number = Math.max(yAtMin, yAtMax, yAtMin + beamBandHeight, yAtMax + beamBandHeight);
-        collisionModel.registerRect(this.rectPxToUnit({
-            x: minX,
-            y: top,
-            width: maxX - minX,
-            height: bottom - top,
-        }), CollisionBoxKind.Beam, vfBeam, vfBeam);
     }
 
     private registerTieCollisionBox(staveTie: VF.StaveTie): void {
@@ -2836,8 +3175,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
             });
         }
 
-        const beamRect: CollisionRect = this.getBeamCollisionRectPx(beam);
-        if (beamRect) {
+        for (const beamRect of this.getBeamCollisionRectsPx(beam)) {
             boxes.push({
                 rect: beamRect,
                 kind: CollisionBoxKind.Beam,
@@ -2847,6 +3185,84 @@ export class VexFlowMeasure extends GraphicalMeasure {
             });
         }
         return boxes;
+    }
+
+    private getBeamCollisionRectsPx(beam: any): CollisionRect[] {
+        if (!beam?.notes?.length || typeof beam.getBeamYToDraw !== "function" ||
+            typeof beam.getSlopeY !== "function") {
+            const fallbackRect: CollisionRect = this.getBeamCollisionRectPx(beam);
+            return fallbackRect ? [fallbackRect] : [];
+        }
+        const firstNote: any = beam.notes[0];
+        const firstStemX: number = Number(firstNote?.getStemX?.());
+        if (!Number.isFinite(firstStemX)) {
+            return [];
+        }
+
+        const stemWidth: number = Math.max(Number((VF.Stem as any)?.WIDTH ?? this.rules.StemWidth * unitInPixels), 0);
+        const signedBeamThickness: number = Math.max(Number(beam.render_options?.beam_width ?? 5), 3) *
+            (this.getBeamStemDirection(beam) === this.getVexFlowStemDown() ? -1 : 1);
+        const validBeamDurations: string[] = ["4", "8", "16", "32", "64"];
+        const rects: CollisionRect[] = [];
+        let beamY: number = Number(beam.getBeamYToDraw());
+        if (!Number.isFinite(beamY)) {
+            return [];
+        }
+
+        for (const duration of validBeamDurations) {
+            const beamLines: any[] = typeof beam.getBeamLines === "function" ? beam.getBeamLines(duration) : [];
+            if (!Array.isArray(beamLines) || beamLines.length === 0) {
+                beamY += signedBeamThickness * 1.5;
+                continue;
+            }
+            for (const beamLine of beamLines) {
+                const startX: number = Number(beamLine?.start);
+                const endX: number = Number(beamLine?.end);
+                if (!Number.isFinite(startX) || !Number.isFinite(endX)) {
+                    continue;
+                }
+                const startY: number = Number(beam.getSlopeY(startX, firstStemX, beamY, beam.slope));
+                const endY: number = Number(beam.getSlopeY(endX, firstStemX, beamY, beam.slope));
+                if (!Number.isFinite(startY) || !Number.isFinite(endY)) {
+                    continue;
+                }
+                const visualEndX: number = endX >= startX ? endX + stemWidth : endX - stemWidth;
+                rects.push(...this.segmentBeamLineCollisionRectsPx(startX, startY, visualEndX, endY, signedBeamThickness));
+            }
+            beamY += signedBeamThickness * 1.5;
+        }
+
+        if (rects.length > 0) {
+            return rects;
+        }
+        const fallbackBeamRect: CollisionRect = this.getBeamCollisionRectPx(beam);
+        return fallbackBeamRect ? [fallbackBeamRect] : [];
+    }
+
+    private segmentBeamLineCollisionRectsPx(startX: number, startY: number, endX: number, endY: number,
+                                            signedThickness: number): CollisionRect[] {
+        const dx: number = endX - startX;
+        const segmentCount: number = Math.max(1, Math.min(64, Math.ceil(Math.abs(dx) / 8)));
+        const rects: CollisionRect[] = [];
+        for (let i: number = 0; i < segmentCount; i++) {
+            const t0: number = i / segmentCount;
+            const t1: number = (i + 1) / segmentCount;
+            const x0: number = startX + dx * t0;
+            const x1: number = startX + dx * t1;
+            const y0: number = startY + (endY - startY) * t0;
+            const y1: number = startY + (endY - startY) * t1;
+            const rect: CollisionRect = this.normalizePxRect({
+                x: Math.min(x0, x1),
+                y: Math.min(y0, y1, y0 + signedThickness, y1 + signedThickness),
+                width: Math.abs(x1 - x0),
+                height: Math.max(y0, y1, y0 + signedThickness, y1 + signedThickness) -
+                    Math.min(y0, y1, y0 + signedThickness, y1 + signedThickness),
+            }, 0.35);
+            if (rect && rect.width > 0.01 && rect.height > 0.01) {
+                rects.push(rect);
+            }
+        }
+        return rects;
     }
 
     private getBeamCollisionRectPx(beam: any): CollisionRect {

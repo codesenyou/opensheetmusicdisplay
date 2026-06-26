@@ -885,12 +885,26 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
     private registerLineCollisionBox(start: PointF2D, end: PointF2D, width: number, kind: CollisionBoxKind,
                                      owner?: Object, source?: Object): void {
         const halfWidth: number = Math.max(width / 2, 0.03);
-        this.registerInternalCollisionRect({
-            x: Math.min(start.x, end.x) - halfWidth,
-            y: Math.min(start.y, end.y) - halfWidth,
-            width: Math.abs(end.x - start.x) + halfWidth * 2,
-            height: Math.abs(end.y - start.y) + halfWidth * 2,
-        }, kind, owner, source);
+        const dx: number = end.x - start.x;
+        const dy: number = end.y - start.y;
+        const length: number = Math.hypot(dx, dy);
+        const segmentCount: number = Number.isFinite(length) && length > 0
+            ? Math.max(1, Math.min(64, Math.ceil(length / 0.8)))
+            : 1;
+        for (let i: number = 0; i < segmentCount; i++) {
+            const t0: number = i / segmentCount;
+            const t1: number = (i + 1) / segmentCount;
+            const x0: number = start.x + dx * t0;
+            const y0: number = start.y + dy * t0;
+            const x1: number = start.x + dx * t1;
+            const y1: number = start.y + dy * t1;
+            this.registerInternalCollisionRect({
+                x: Math.min(x0, x1) - halfWidth,
+                y: Math.min(y0, y1) - halfWidth,
+                width: Math.abs(x1 - x0) + halfWidth * 2,
+                height: Math.abs(y1 - y0) + halfWidth * 2,
+            }, kind, owner, source);
+        }
     }
 
     private registerPointBoundsCollisionBox(points: PointF2D[], kind: CollisionBoxKind, owner?: Object, source?: Object): void {
