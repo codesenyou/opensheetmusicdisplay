@@ -26,6 +26,7 @@ import {OutlineAndFillStyleEnum} from "./DrawingEnums";
 import { MusicSheetDrawer } from "./MusicSheetDrawer";
 import { GraphicalVoiceEntry } from "./GraphicalVoiceEntry";
 import { GraphicalObject } from "./GraphicalObject";
+import { CollisionModel } from "./CollisionModel";
 // import { VexFlowMusicSheetDrawer } from "./VexFlow/VexFlowMusicSheetDrawer";
 // import { SvgVexFlowBackend } from "./VexFlow/SvgVexFlowBackend"; // causes build problem with npm start
 
@@ -60,6 +61,7 @@ export class GraphicalMusicSheet {
     //private systemImages: Dictionary<MusicSystem, SystemImageProperties> = new Dictionary<MusicSystem, SystemImageProperties>();
     private numberOfStaves: number;
     private leadSheet: boolean = false;
+    private collisionModel: CollisionModel = new CollisionModel();
 
     public get ParentMusicSheet(): MusicSheet {
         return this.musicSheet;
@@ -173,6 +175,10 @@ export class GraphicalMusicSheet {
         this.leadSheet = value;
     }
 
+    public get CollisionModel(): CollisionModel {
+        return this.collisionModel;
+    }
+
     /**
      * Calculate the Absolute Positions from the Relative Positions.
      * @param graphicalMusicSheet
@@ -189,6 +195,7 @@ export class GraphicalMusicSheet {
         this.verticalGraphicalStaffEntryContainers = [];
         this.musicPages = [];
         this.measureList = [];
+        this.collisionModel.clear();
     }
 
     public reCalculate(): void {

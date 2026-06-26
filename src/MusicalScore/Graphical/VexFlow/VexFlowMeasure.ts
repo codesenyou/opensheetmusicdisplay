@@ -38,6 +38,7 @@ import { Arpeggio } from "../../VoiceData/Arpeggio";
 import { GraphicalTie } from "../GraphicalTie";
 import { Note } from "../../VoiceData/Note";
 import { TabNote } from "../../VoiceData/TabNote";
+import { CollisionBoxKind, CollisionModel, CollisionRect } from "../CollisionModel";
 
 // type StemmableNote = VF.StemmableNote;
 
@@ -70,6 +71,24 @@ interface BeamCollisionBaseline {
     yShift: number;
     stemDirection: number;
     stemExtensions: number[];
+}
+
+interface BeamDirectionLayoutSnapshot {
+    beamDirections: Map<any, number>;
+    noteDirections: Map<any, number>;
+}
+
+interface BeamDirectionCandidateBox {
+    rect: CollisionRect;
+    kind: CollisionBoxKind;
+    beam: any;
+    owner?: Object;
+    ignoreOwners: Set<Object>;
+}
+
+interface BeamDirectionScoredPlan {
+    directions: number[];
+    score: number;
 }
 
 export class VexFlowMeasure extends GraphicalMeasure {
@@ -126,6 +145,8 @@ export class VexFlowMeasure extends GraphicalMeasure {
     private tieCollisionBaselines: WeakMap<VF.StaveTie, TieCollisionBaseline> = new WeakMap();
     /** Original VexFlow beam/stem options, so collision optimization stays idempotent across repeated draws. */
     private beamCollisionBaselines: WeakMap<VF.Beam, BeamCollisionBaseline> = new WeakMap();
+    /** Whether a beam was auto-stemmed and may be flipped by the measure-wide collision optimizer. */
+    private beamStemFlipAllowed: WeakMap<VF.Beam, boolean> = new WeakMap();
     // The engraving rules of OSMD.
     public rules: EngravingRules;
 
@@ -685,6 +706,8 @@ export class VexFlowMeasure extends GraphicalMeasure {
 
         // Draw stave lines
         this.stave.setContext(ctx).draw();
+        this.registerMeasureBarlineCollisionBoxes();
+        this.optimizeBeamStemDirectionCombinations();
         // Draw all voices
         for (const voiceID in this.vfVoices) {
             if (this.vfVoices.hasOwnProperty(voiceID)) {
@@ -697,12 +720,14 @@ export class VexFlowMeasure extends GraphicalMeasure {
         }
         const noteheadSamples: NoteheadCollisionSample[] = this.collectNoteheadCollisionSamples();
         const stemSamples: StemCollisionSample[] = this.collectStemCollisionSamples();
+        this.registerVoiceCollisionBoxes(noteheadSamples, stemSamples);
         // Draw beams
         for (const voiceID in this.vfbeams) {
             if (this.vfbeams.hasOwnProperty(voiceID)) {
                 for (const beam of this.vfbeams[voiceID]) {
                     this.optimizeBeamAndStemCollision(beam, noteheadSamples, stemSamples);
                     beam.setContext(ctx).draw();
+                    this.registerBeamCollisionBox(beam);
                 }
             }
         }
@@ -711,6 +736,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
             for (const beam of this.autoVfBeams) {
                 this.optimizeBeamAndStemCollision(beam, noteheadSamples, stemSamples);
                 beam.setContext(ctx).draw();
+                this.registerBeamCollisionBox(beam);
             }
         }
         if (!this.isTabMeasure || this.rules.TupletNumbersInTabs) {
@@ -718,6 +744,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 for (const beam of this.autoTupletVfBeams) {
                     this.optimizeBeamAndStemCollision(beam, noteheadSamples, stemSamples);
                     beam.setContext(ctx).draw();
+                    this.registerBeamCollisionBox(beam);
                 }
             }
             // Draw tuplets
@@ -754,6 +781,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
             this.optimizeTieCollision(tie, noteheadSamples);
             tie.setContext(ctx);
             tie.draw();
+            this.registerTieCollisionBox(tie);
         }
         ctx.closeGroup(); // close measure group
 
@@ -1094,6 +1122,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                             (<any>vfBeam).render_options.flat_beam_offset = this.rules.FlatBeamOffset;
                             (<any>vfBeam).render_options.flat_beam_offset_per_beam = this.rules.FlatBeamOffsetPerBeam;
                         }
+                        this.beamStemFlipAllowed.set(vfBeam, autoStemBeam && !hasCrossStaffTransferredNote);
                         vfbeams.push(vfBeam);
                     } else {
                         log.debug("Warning! Beam with no notes!");
@@ -1216,6 +1245,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                                     (<any>vfBeam).render_options.flat_beam_offset = this.rules.FlatBeamOffset;
                                     (<any>vfBeam).render_options.flat_beam_offset_per_beam = this.rules.FlatBeamOffsetPerBeam;
                                 }
+                                this.beamStemFlipAllowed.set(vfBeam, true);
                                 this.autoTupletVfBeams.push(vfBeam);
 
                                 const osmdBeam: Beam = new Beam(autoBeamId++);
@@ -1250,6 +1280,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 (<any>vfBeam).render_options.flat_beam_offset = this.rules.FlatBeamOffset;
                 (<any>vfBeam).render_options.flat_beam_offset_per_beam = this.rules.FlatBeamOffsetPerBeam;
             }
+            this.beamStemFlipAllowed.set(vfBeam, true);
             this.autoTupletVfBeams.push(vfBeam);
 
             const osmdBeam: Beam = new Beam(autoBeamId++);
@@ -1292,6 +1323,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                     (<any>vfBeam).render_options.flat_beam_offset = this.rules.FlatBeamOffset;
                     (<any>vfBeam).render_options.flat_beam_offset_per_beam = this.rules.FlatBeamOffsetPerBeam;
                 }
+                this.beamStemFlipAllowed.set(vfBeam, !generateBeamOptions.maintain_stem_directions);
                 this.autoVfBeams.push(vfBeam);
             }
         }
@@ -1862,6 +1894,207 @@ export class VexFlowMeasure extends GraphicalMeasure {
         }
     }
 
+    private getCollisionModel(): CollisionModel {
+        return this.ParentStaffLine?.ParentMusicSystem?.Parent?.Parent?.CollisionModel;
+    }
+
+    private registerMeasureBarlineCollisionBoxes(): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel) {
+            return;
+        }
+        const lineWidth: number = Math.max(this.rules.StaffLineWidth, 0.06);
+        const x: number = this.PositionAndShape.AbsolutePosition.x;
+        const y: number = this.PositionAndShape.AbsolutePosition.y;
+        const height: number = Math.max(this.ParentStaff?.StafflineCount - 1, 1);
+        collisionModel.registerRect({
+            x: x - lineWidth / 2,
+            y,
+            width: lineWidth,
+            height,
+        }, CollisionBoxKind.MeasureBarline, this, this.stave);
+        collisionModel.registerRect({
+            x: x + this.PositionAndShape.Size.width - lineWidth / 2,
+            y,
+            width: lineWidth,
+            height,
+        }, CollisionBoxKind.MeasureBarline, this, this.stave);
+    }
+
+    private registerVoiceCollisionBoxes(noteheadSamples: NoteheadCollisionSample[], stemSamples: StemCollisionSample[]): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel) {
+            return;
+        }
+        for (const sample of noteheadSamples) {
+            collisionModel.registerRect(this.rectPxToUnit({
+                x: sample.x - sample.radius,
+                y: sample.y - sample.radius,
+                width: sample.radius * 2,
+                height: sample.radius * 2,
+            }), CollisionBoxKind.Notehead, sample.staveNote, sample.staveNote);
+        }
+        for (const sample of stemSamples) {
+            collisionModel.registerRect(this.rectPxToUnit({
+                x: sample.x - Math.max(this.rules.StemWidth * unitInPixels, 1) / 2,
+                y: sample.topY,
+                width: Math.max(this.rules.StemWidth * unitInPixels, 1),
+                height: sample.bottomY - sample.topY,
+            }), CollisionBoxKind.Stem, sample.staveNote, sample.staveNote);
+        }
+        for (const tickable of this.getAllTickables()) {
+            this.registerVexFlowElementCollisionBox(tickable, this.classifyVexFlowElement(tickable));
+            const modifiers: any[] = typeof tickable?.getModifiers === "function" ? tickable.getModifiers() : tickable?.modifiers;
+            if (!Array.isArray(modifiers)) {
+                continue;
+            }
+            for (const modifier of modifiers) {
+                this.registerVexFlowElementCollisionBox(modifier, this.classifyVexFlowElement(modifier));
+            }
+        }
+    }
+
+    private registerVexFlowElementCollisionBox(element: any, kind: CollisionBoxKind): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        const rect: CollisionRect = this.getVexFlowElementRect(element);
+        if (!collisionModel || !rect) {
+            return;
+        }
+        collisionModel.registerRect(this.rectPxToUnit(rect), kind, element, element);
+    }
+
+    private getVexFlowElementRect(element: any): CollisionRect {
+        let box: any;
+        try {
+            box = typeof element?.getBoundingBox === "function" ? element.getBoundingBox() : element?.boundingBox;
+        } catch (e) {
+            return undefined;
+        }
+        if (!box) {
+            return undefined;
+        }
+        const x: number = typeof box.getX === "function" ? box.getX() : box.x;
+        const y: number = typeof box.getY === "function" ? box.getY() : box.y;
+        const width: number = typeof box.getW === "function" ? box.getW() : box.w;
+        const height: number = typeof box.getH === "function" ? box.getH() : box.h;
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+            return undefined;
+        }
+        return { x, y, width, height };
+    }
+
+    private classifyVexFlowElement(element: any): CollisionBoxKind {
+        const category: string = typeof element?.getCategory === "function" ? element.getCategory() : element?.category;
+        const constructorName: string = element?.constructor?.name ?? "";
+        const descriptor: string = `${category ?? ""} ${constructorName}`.toLowerCase();
+        if (descriptor.indexOf("finger") >= 0 || descriptor.indexOf("stringnumber") >= 0) {
+            return CollisionBoxKind.Fingering;
+        }
+        if (descriptor.indexOf("ornament") >= 0) {
+            return CollisionBoxKind.Ornament;
+        }
+        if (descriptor.indexOf("articulation") >= 0) {
+            return CollisionBoxKind.Articulation;
+        }
+        if (descriptor.indexOf("tuplet") >= 0) {
+            return CollisionBoxKind.Tuplet;
+        }
+        if (descriptor.indexOf("note") >= 0) {
+            return CollisionBoxKind.Notehead;
+        }
+        return CollisionBoxKind.GenericBoundingBox;
+    }
+
+    private registerBeamCollisionBox(vfBeam: VF.Beam): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        const beam: any = vfBeam as any;
+        if (!collisionModel || !beam?.notes?.length) {
+            return;
+        }
+        const stemXs: number[] = beam.notes.map((note: any) => note?.getStemX?.()).filter((x: number) => Number.isFinite(x));
+        if (stemXs.length < 2) {
+            return;
+        }
+        const minX: number = Math.min(...stemXs);
+        const maxX: number = Math.max(...stemXs);
+        const firstNote: any = beam.notes[0];
+        const firstStemX: number = firstNote.getStemX();
+        const beamY: number = beam.getBeamYToDraw();
+        const beamThickness: number = Math.max(beam.render_options?.beam_width ?? 5, 3);
+        const beamBandHeight: number = beamThickness * (((beam.beam_count ?? 1) - 1) * 1.5 + 1);
+        const yAtMin: number = beam.getSlopeY(minX, firstStemX, beamY, beam.slope);
+        const yAtMax: number = beam.getSlopeY(maxX, firstStemX, beamY, beam.slope);
+        const top: number = Math.min(yAtMin, yAtMax, yAtMin + beamBandHeight, yAtMax + beamBandHeight);
+        const bottom: number = Math.max(yAtMin, yAtMax, yAtMin + beamBandHeight, yAtMax + beamBandHeight);
+        collisionModel.registerRect(this.rectPxToUnit({
+            x: minX,
+            y: top,
+            width: maxX - minX,
+            height: bottom - top,
+        }), CollisionBoxKind.Beam, vfBeam, vfBeam);
+    }
+
+    private registerTieCollisionBox(staveTie: VF.StaveTie): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        const tie: any = staveTie as any;
+        if (!collisionModel) {
+            return;
+        }
+        const geometry: ReturnType<typeof this.getTieGeometry> = this.getTieGeometry(tie);
+        if (!geometry) {
+            return;
+        }
+        const direction: number = this.getTieDirection(tie);
+        const yShift: number = Number.isFinite(tie?.render_options?.y_shift) ? tie.render_options.y_shift : 7;
+        const cp2: number = Number.isFinite(tie?.render_options?.cp2) ? tie.render_options.cp2 : 12;
+        const x1: number = geometry.firstX;
+        const x2: number = geometry.lastX;
+        const yValues: number[] = [];
+        for (let i: number = 0; i < geometry.firstIndices.length; i++) {
+            const firstY: number = geometry.firstYs[geometry.firstIndices[i]] + yShift * direction;
+            const lastY: number = geometry.lastYs[geometry.lastIndices[i]] + yShift * direction;
+            const controlY: number = (firstY + lastY) / 2 + cp2 * direction;
+            if (Number.isFinite(firstY) && Number.isFinite(lastY) && Number.isFinite(controlY)) {
+                yValues.push(firstY, lastY, controlY);
+            }
+        }
+        if (yValues.length === 0) {
+            return;
+        }
+        const top: number = Math.min(...yValues) - 2;
+        const bottom: number = Math.max(...yValues) + 2;
+        collisionModel.registerRect(this.rectPxToUnit({
+            x: Math.min(x1, x2),
+            y: top,
+            width: Math.abs(x2 - x1),
+            height: bottom - top,
+        }), CollisionBoxKind.Tie, staveTie, staveTie);
+    }
+
+    private getAllTickables(): any[] {
+        const tickables: any[] = [];
+        for (const voiceID in this.vfVoices) {
+            if (!this.vfVoices.hasOwnProperty(voiceID)) {
+                continue;
+            }
+            const voice: any = this.vfVoices[voiceID];
+            const voiceTickables: any[] = voice?.getTickables?.() ?? voice?.tickables;
+            if (Array.isArray(voiceTickables)) {
+                tickables.push(...voiceTickables);
+            }
+        }
+        return tickables;
+    }
+
+    private rectPxToUnit(rect: CollisionRect): CollisionRect {
+        return {
+            x: rect.x / unitInPixels,
+            y: rect.y / unitInPixels,
+            width: rect.width / unitInPixels,
+            height: rect.height / unitInPixels,
+        };
+    }
+
     /** True if tie direction was explicitly set in XML and should not be auto-flipped. */
     private tieDirectionIsLockedByXml(graphicalTie: GraphicalTie): boolean {
         const tieModel: any = graphicalTie?.Tie;
@@ -2059,6 +2292,390 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 note.setStemDirection(direction);
             }
         }
+    }
+
+    private optimizeBeamStemDirectionCombinations(): void {
+        const beams: any[] = this.getAllCollisionBeams();
+        if (beams.length < 2 || !this.measureHasMultipleVoices()) {
+            return;
+        }
+
+        const flippableBeams: any[] = beams.filter((beam: any) => this.beamStemFlipAllowed.get(beam as VF.Beam) === true);
+        if (flippableBeams.length === 0) {
+            return;
+        }
+
+        const snapshot: BeamDirectionLayoutSnapshot = this.captureBeamDirectionLayout(beams);
+        const baselineDirections: number[] = beams.map((beam: any) => snapshot.beamDirections.get(beam) ?? this.getBeamStemDirection(beam));
+        const directionsByBeam: Map<any, number[]> = new Map<any, number[]>();
+        for (const beam of beams) {
+            const direction: number = snapshot.beamDirections.get(beam) ?? this.getBeamStemDirection(beam);
+            const directions: number[] = this.beamStemFlipAllowed.get(beam as VF.Beam) === true
+                ? [direction, -direction]
+                : [direction];
+            directionsByBeam.set(beam, directions);
+        }
+
+        const plan: BeamDirectionScoredPlan = this.findBestBeamDirectionPlan(beams, directionsByBeam, baselineDirections);
+        this.restoreBeamDirectionLayout(snapshot);
+        if (!plan) {
+            return;
+        }
+        for (let i: number = 0; i < beams.length; i++) {
+            this.applyBeamStemDirection(beams[i], plan.directions[i]);
+            this.beamCollisionBaselines.delete(beams[i] as VF.Beam);
+        }
+    }
+
+    private findBestBeamDirectionPlan(
+        beams: any[],
+        directionsByBeam: Map<any, number[]>,
+        baselineDirections: number[]
+    ): BeamDirectionScoredPlan {
+        const maxCombinationCount: number = 1024;
+        let combinationCount: number = 1;
+        for (const beam of beams) {
+            combinationCount *= directionsByBeam.get(beam).length;
+        }
+        return combinationCount <= maxCombinationCount
+            ? this.findBestBeamDirectionPlanExhaustive(beams, directionsByBeam, baselineDirections)
+            : this.findBestBeamDirectionPlanGreedy(beams, directionsByBeam, baselineDirections);
+    }
+
+    private findBestBeamDirectionPlanExhaustive(
+        beams: any[],
+        directionsByBeam: Map<any, number[]>,
+        baselineDirections: number[]
+    ): BeamDirectionScoredPlan {
+        let bestPlan: BeamDirectionScoredPlan;
+        const currentDirections: number[] = [];
+        const visit: (beamIndex: number) => void = (beamIndex: number): void => {
+            if (beamIndex >= beams.length) {
+                const score: number = this.scoreBeamDirectionPlan(beams, currentDirections, baselineDirections);
+                if (!bestPlan || score < bestPlan.score) {
+                    bestPlan = { directions: currentDirections.slice(), score };
+                }
+                return;
+            }
+            for (const direction of directionsByBeam.get(beams[beamIndex])) {
+                currentDirections[beamIndex] = direction;
+                visit(beamIndex + 1);
+            }
+        };
+        visit(0);
+        return bestPlan;
+    }
+
+    private findBestBeamDirectionPlanGreedy(
+        beams: any[],
+        directionsByBeam: Map<any, number[]>,
+        baselineDirections: number[]
+    ): BeamDirectionScoredPlan {
+        const directions: number[] = baselineDirections.slice();
+        let bestScore: number = this.scoreBeamDirectionPlan(beams, directions, baselineDirections);
+        let improved: boolean = true;
+        while (improved) {
+            improved = false;
+            for (let i: number = 0; i < beams.length; i++) {
+                const beamDirections: number[] = directionsByBeam.get(beams[i]);
+                if (beamDirections.length < 2) {
+                    continue;
+                }
+                const originalDirection: number = directions[i];
+                directions[i] = -originalDirection;
+                const score: number = this.scoreBeamDirectionPlan(beams, directions, baselineDirections);
+                if (score < bestScore) {
+                    bestScore = score;
+                    improved = true;
+                } else {
+                    directions[i] = originalDirection;
+                }
+            }
+        }
+        return { directions, score: bestScore };
+    }
+
+    private scoreBeamDirectionPlan(beams: any[], directions: number[], baselineDirections: number[]): number {
+        for (let i: number = 0; i < beams.length; i++) {
+            this.applyBeamStemDirection(beams[i], directions[i]);
+        }
+
+        const staticCollisionModel: CollisionModel = this.createStaticBeamCollisionModel(beams);
+        const candidateBoxes: BeamDirectionCandidateBox[] = [];
+        for (const beam of beams) {
+            candidateBoxes.push(...this.getBeamDirectionCandidateBoxes(beam));
+        }
+
+        let score: number = 0;
+        for (const candidateBox of candidateBoxes) {
+            for (const collision of staticCollisionModel.getCollisions(candidateBox.rect, {
+                ignoreOwners: candidateBox.ignoreOwners
+            })) {
+                score += this.getBeamDirectionCollisionWeight(collision.kind);
+                score += this.getRectOverlapArea(candidateBox.rect, collision.rect);
+            }
+        }
+
+        for (let i: number = 0; i < candidateBoxes.length; i++) {
+            for (let j: number = i + 1; j < candidateBoxes.length; j++) {
+                const a: BeamDirectionCandidateBox = candidateBoxes[i];
+                const b: BeamDirectionCandidateBox = candidateBoxes[j];
+                if (a.beam === b.beam) {
+                    continue;
+                }
+                if (!CollisionModel.rectsOverlap(a.rect, b.rect)) {
+                    continue;
+                }
+                score += 1000;
+                score += this.getRectOverlapArea(a.rect, b.rect);
+            }
+        }
+
+        for (let i: number = 0; i < beams.length; i++) {
+            if (directions[i] !== baselineDirections[i]) {
+                score += 1;
+            }
+        }
+        return score;
+    }
+
+    private createStaticBeamCollisionModel(beams: any[]): CollisionModel {
+        const model: CollisionModel = new CollisionModel();
+        const beamNotes: Set<any> = new Set<any>();
+        for (const beam of beams) {
+            for (const note of beam.notes ?? []) {
+                beamNotes.add(note);
+            }
+        }
+
+        for (const sample of this.collectNoteheadCollisionSamples()) {
+            model.registerRect({
+                x: sample.x - sample.radius,
+                y: sample.y - sample.radius,
+                width: sample.radius * 2,
+                height: sample.radius * 2,
+            }, CollisionBoxKind.Notehead, sample.staveNote, sample.staveNote);
+        }
+
+        for (const sample of this.collectStemCollisionSamples()) {
+            if (beamNotes.has(sample.staveNote)) {
+                continue;
+            }
+            model.registerRect({
+                x: sample.x - Math.max(this.rules.StemWidth * unitInPixels, 1) / 2,
+                y: sample.topY,
+                width: Math.max(this.rules.StemWidth * unitInPixels, 1),
+                height: sample.bottomY - sample.topY,
+            }, CollisionBoxKind.Stem, sample.staveNote, sample.staveNote);
+        }
+
+        const globalCollisionModel: CollisionModel = this.getCollisionModel();
+        if (globalCollisionModel) {
+            for (const box of globalCollisionModel.Boxes) {
+                if (box.kind !== CollisionBoxKind.Fingering && box.kind !== CollisionBoxKind.MeasureBarline) {
+                    continue;
+                }
+                model.registerRect(this.rectUnitToPx(box.rect), box.kind, box.owner, box.source, box.movable, box.priority, box.label);
+            }
+        }
+        return model;
+    }
+
+    private getBeamDirectionCollisionWeight(kind: CollisionBoxKind): number {
+        switch (kind) {
+            case CollisionBoxKind.Notehead:
+                return 10000;
+            case CollisionBoxKind.Stem:
+            case CollisionBoxKind.Beam:
+                return 1000;
+            case CollisionBoxKind.Fingering:
+                return 100;
+            case CollisionBoxKind.MeasureBarline:
+                return 50;
+            default:
+                return 10;
+        }
+    }
+
+    private getBeamDirectionCandidateBoxes(beam: any): BeamDirectionCandidateBox[] {
+        const boxes: BeamDirectionCandidateBox[] = [];
+        const beamNotes: Set<Object> = new Set<Object>((beam.notes ?? []) as Object[]);
+        for (const note of beam.notes ?? []) {
+            if (!note || typeof note.getStemX !== "function" || typeof note.getStemExtents !== "function") {
+                continue;
+            }
+            if (typeof note.isRest === "function" && note.isRest()) {
+                continue;
+            }
+            const x: number = note.getStemX();
+            const extents: any = note.getStemExtents();
+            const topY: number = extents?.topY;
+            const baseY: number = extents?.baseY;
+            if (!Number.isFinite(x) || !Number.isFinite(topY) || !Number.isFinite(baseY)) {
+                continue;
+            }
+            boxes.push({
+                rect: {
+                    x: x - Math.max(this.rules.StemWidth * unitInPixels, 1) / 2,
+                    y: Math.min(topY, baseY),
+                    width: Math.max(this.rules.StemWidth * unitInPixels, 1),
+                    height: Math.max(topY, baseY) - Math.min(topY, baseY),
+                },
+                kind: CollisionBoxKind.Stem,
+                beam,
+                owner: note,
+                ignoreOwners: new Set<Object>([note]),
+            });
+        }
+
+        const beamRect: CollisionRect = this.getBeamCollisionRectPx(beam);
+        if (beamRect) {
+            boxes.push({
+                rect: beamRect,
+                kind: CollisionBoxKind.Beam,
+                beam,
+                owner: beam,
+                ignoreOwners: beamNotes,
+            });
+        }
+        return boxes;
+    }
+
+    private getBeamCollisionRectPx(beam: any): CollisionRect {
+        if (!beam?.notes?.length) {
+            return undefined;
+        }
+        const stemXs: number[] = beam.notes.map((note: any) => note?.getStemX?.()).filter((x: number) => Number.isFinite(x));
+        if (stemXs.length < 2) {
+            return undefined;
+        }
+        const minX: number = Math.min(...stemXs);
+        const maxX: number = Math.max(...stemXs);
+        const firstNote: any = beam.notes[0];
+        const firstStemX: number = firstNote.getStemX();
+        const beamY: number = beam.getBeamYToDraw();
+        const beamThickness: number = Math.max(beam.render_options?.beam_width ?? 5, 3);
+        const beamBandHeight: number = beamThickness * (((beam.beam_count ?? 1) - 1) * 1.5 + 1);
+        const yAtMin: number = beam.getSlopeY(minX, firstStemX, beamY, beam.slope);
+        const yAtMax: number = beam.getSlopeY(maxX, firstStemX, beamY, beam.slope);
+        const top: number = Math.min(yAtMin, yAtMax, yAtMin + beamBandHeight, yAtMax + beamBandHeight);
+        const bottom: number = Math.max(yAtMin, yAtMax, yAtMin + beamBandHeight, yAtMax + beamBandHeight);
+        if (!Number.isFinite(top) || !Number.isFinite(bottom)) {
+            return undefined;
+        }
+        return {
+            x: minX,
+            y: top,
+            width: maxX - minX,
+            height: bottom - top,
+        };
+    }
+
+    private getAllCollisionBeams(): any[] {
+        const beams: any[] = [];
+        for (const voiceID in this.vfbeams) {
+            if (!this.vfbeams.hasOwnProperty(voiceID)) {
+                continue;
+            }
+            beams.push(...this.vfbeams[voiceID]);
+        }
+        if (this.autoVfBeams) {
+            beams.push(...this.autoVfBeams);
+        }
+        if (this.autoTupletVfBeams) {
+            beams.push(...this.autoTupletVfBeams);
+        }
+        return beams.filter((beam: any) => Array.isArray(beam?.notes) && beam.notes.length > 1);
+    }
+
+    private measureHasMultipleVoices(): boolean {
+        const voiceIds: Set<number> = new Set<number>();
+        for (const staffEntry of this.staffEntries) {
+            for (const graphicalVoiceEntry of staffEntry.graphicalVoiceEntries) {
+                const voiceId: number = graphicalVoiceEntry.parentVoiceEntry?.ParentVoice?.VoiceId;
+                if (voiceId !== undefined) {
+                    voiceIds.add(voiceId);
+                }
+            }
+        }
+        return voiceIds.size > 1;
+    }
+
+    private captureBeamDirectionLayout(beams: any[]): BeamDirectionLayoutSnapshot {
+        const beamDirections: Map<any, number> = new Map<any, number>();
+        const noteDirections: Map<any, number> = new Map<any, number>();
+        for (const beam of beams) {
+            beamDirections.set(beam, this.getBeamStemDirection(beam));
+            for (const note of beam.notes ?? []) {
+                if (!noteDirections.has(note)) {
+                    noteDirections.set(note, note?.getStemDirection?.() ?? note?.stem_direction ?? VF.Stem.UP);
+                }
+            }
+        }
+        return { beamDirections, noteDirections };
+    }
+
+    private restoreBeamDirectionLayout(snapshot: BeamDirectionLayoutSnapshot): void {
+        for (const [note, direction] of snapshot.noteDirections) {
+            if (typeof note?.setStemDirection === "function") {
+                note.setStemDirection(direction);
+            }
+        }
+        for (const [beam, direction] of snapshot.beamDirections) {
+            this.applyBeamStemDirection(beam, direction);
+        }
+    }
+
+    private applyBeamStemDirection(beam: any, direction: number): void {
+        if (direction !== VF.Stem.UP && direction !== VF.Stem.DOWN) {
+            return;
+        }
+        for (const note of beam.notes ?? []) {
+            if (typeof note?.setStemDirection === "function") {
+                note.setStemDirection(direction);
+            }
+            if (note) {
+                note.stem_direction = direction;
+            }
+        }
+        beam.stem_direction = direction;
+        if (typeof beam.postFormat === "function") {
+            try {
+                beam.postFormatted = false;
+                beam.postFormat();
+            } catch (e) {
+                // Some malformed beams cannot be post-formatted until VexFlow draws them.
+            }
+        }
+    }
+
+    private getBeamStemDirection(beam: any): number {
+        if (beam?.stem_direction === VF.Stem.UP || beam?.stem_direction === VF.Stem.DOWN) {
+            return beam.stem_direction;
+        }
+        const firstDirection: number = beam?.notes?.[0]?.getStemDirection?.();
+        if (firstDirection === VF.Stem.UP || firstDirection === VF.Stem.DOWN) {
+            return firstDirection;
+        }
+        return VF.Stem.UP;
+    }
+
+    private rectUnitToPx(rect: CollisionRect): CollisionRect {
+        return {
+            x: rect.x * unitInPixels,
+            y: rect.y * unitInPixels,
+            width: rect.width * unitInPixels,
+            height: rect.height * unitInPixels,
+        };
+    }
+
+    private getRectOverlapArea(a: CollisionRect, b: CollisionRect): number {
+        const overlapWidth: number = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+        const overlapHeight: number = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+        if (overlapWidth <= 0 || overlapHeight <= 0) {
+            return 0;
+        }
+        return overlapWidth * overlapHeight;
     }
 
     private interpolateLineY(x: number, firstX: number, firstY: number, lastX: number, lastY: number): number {

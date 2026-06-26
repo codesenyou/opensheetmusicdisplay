@@ -70,6 +70,9 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         (Vex.Flow as any).DEFAULT_NOTATION_FONT_SCALE = this.rules.VexFlowDefaultNotationFontScale; // default 39
         (Vex.Flow as any).DEFAULT_TAB_FONT_SCALE = this.rules.VexFlowDefaultTabFontScale; // default 39 // TODO doesn't seem to do anything
 
+        graphicalMusicSheet.CollisionModel.clear();
+        graphicalMusicSheet.CollisionModel.registerBoundingBoxesFromMusicSheet(graphicalMusicSheet);
+
         this.pageIdx = 0;
         for (const graphicalMusicPage of graphicalMusicSheet.MusicPages) {
             if (graphicalMusicPage.PageNumber > this.rules.MaxPageToDrawNumber) {

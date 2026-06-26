@@ -6,6 +6,7 @@ export * from "./AccidentalCalculator";
 export * from "./VexFlow/AlignmentManager";
 export * from "./BoundingBox";
 export * from "./Clickable";
+export * from "./CollisionModel";
 export * from "./DrawingEnums";
 export * from "./DrawingMode";
 export * from "./DrawingParameters";
