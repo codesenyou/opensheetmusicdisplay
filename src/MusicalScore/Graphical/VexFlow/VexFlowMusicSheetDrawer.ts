@@ -35,6 +35,7 @@ import { VexFlowGlissando } from "./VexFlowGlissando";
 import { VexFlowGraphicalNote } from "./VexFlowGraphicalNote";
 import { SvgVexFlowBackend } from "./SvgVexFlowBackend";
 import { VexFlowVibratoBracket } from "./VexFlowVibratoBracket";
+import { CollisionBox, CollisionBoxKind, CollisionModel, CollisionRect } from "../CollisionModel";
 
 /**
  * This is a global constant which denotes the height in pixels of the space between two lines of the stave
@@ -48,6 +49,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
     private backends: VexFlowBackend[] = [];
     private zoom: number = 1.0;
     private pageIdx: number = 0; // this is a bad solution, should use MusicPage.PageNumber instead.
+    private registeredSystemConnectorKeys: Set<string> = new Set<string>();
 
     constructor(drawingParameters: DrawingParameters = new DrawingParameters()) {
         super(new VexFlowTextMeasurer(drawingParameters.Rules), drawingParameters);
@@ -72,6 +74,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
 
         graphicalMusicSheet.CollisionModel.clear();
         graphicalMusicSheet.CollisionModel.registerBoundingBoxesFromMusicSheet(graphicalMusicSheet);
+        this.registeredSystemConnectorKeys.clear();
 
         this.pageIdx = 0;
         for (const graphicalMusicPage of graphicalMusicSheet.MusicPages) {
@@ -89,6 +92,266 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         this.pageIdx = 0;
         this.backend = this.backends[0];
         super.drawSheet(graphicalMusicSheet);
+        this.exportInternalCollisionDebug(graphicalMusicSheet);
+    }
+
+    private getInternalCollisionDebugScope(): any {
+        if (typeof globalThis === "undefined") {
+            return undefined;
+        }
+        const scope: any = globalThis as any;
+        return scope?.document ? scope : undefined;
+    }
+
+    private exportInternalCollisionDebug(graphicalMusicSheet: GraphicalMusicSheet): void {
+        const scope: any = this.getInternalCollisionDebugScope();
+        if (!scope) {
+            return;
+        }
+
+        const fingeringLabels: Set<GraphicalLabel> = this.collectFingeringLabels(graphicalMusicSheet);
+        const boxes: any[] = [];
+        const renderedKeys: Set<string> = new Set<string>();
+
+        for (const collisionBox of graphicalMusicSheet.CollisionModel.Boxes) {
+            const kind: string = this.getInternalCollisionDebugKind(collisionBox, fingeringLabels);
+            if (!kind || !CollisionModel.isUsableRect(collisionBox.rect)) {
+                continue;
+            }
+
+            const measure: VexFlowMeasure = this.findInternalCollisionDebugMeasure(graphicalMusicSheet, collisionBox.rect);
+            const staffId: number = measure?.ParentStaff?.Id ?? 0;
+            const key: string = this.getInternalCollisionDebugKey(collisionBox.id, kind, measure, staffId, collisionBox.rect);
+            renderedKeys.add(key);
+            if (collisionBox.owner instanceof GraphicalLabel) {
+                renderedKeys.add(this.getInternalCollisionDebugKey(
+                    `label:${collisionBox.owner.Label?.text ?? ""}`,
+                    kind,
+                    measure,
+                    staffId,
+                    collisionBox.rect
+                ));
+            }
+
+            boxes.push({
+                key,
+                kind,
+                sourceKind: collisionBox.kind,
+                ownerClass: (collisionBox.owner as any)?.constructor?.name,
+                sourceClass: (collisionBox.source as any)?.constructor?.name,
+                label: collisionBox.label,
+                measure: measure?.MeasureNumber,
+                staffId,
+                measureX: measure?.PositionAndShape?.RelativePosition?.x,
+                source: "osmd-collision-model",
+                svgRect: {
+                    x: collisionBox.rect.x * unitInPixels,
+                    y: collisionBox.rect.y * unitInPixels,
+                    width: collisionBox.rect.width * unitInPixels,
+                    height: collisionBox.rect.height * unitInPixels
+                }
+            });
+        }
+        this.appendFingeringLabelDebugBoxes(graphicalMusicSheet, boxes, renderedKeys);
+
+        scope.__osmdInternalCollisionDebug = {
+            generatedAt: new Date().toISOString(),
+            unitInPixels,
+            source: "osmd-collision-model",
+            boxes
+        };
+    }
+
+    private collectFingeringLabels(graphicalMusicSheet: GraphicalMusicSheet): Set<GraphicalLabel> {
+        const labels: Set<GraphicalLabel> = new Set<GraphicalLabel>();
+        for (const measureColumn of graphicalMusicSheet.MeasureList) {
+            for (const measure of measureColumn ?? []) {
+                for (const staffEntry of measure?.staffEntries ?? []) {
+                    for (const label of staffEntry.FingeringEntries ?? []) {
+                        labels.add(label);
+                    }
+                }
+            }
+        }
+        return labels;
+    }
+
+    private appendFingeringLabelDebugBoxes(graphicalMusicSheet: GraphicalMusicSheet, boxes: any[],
+                                           renderedKeys: Set<string>): void {
+        const kind: string = "label-placed";
+        for (const measureColumn of graphicalMusicSheet.MeasureList) {
+            for (const measure of measureColumn ?? []) {
+                const vexFlowMeasure: VexFlowMeasure = measure as VexFlowMeasure;
+                const staffId: number = vexFlowMeasure?.ParentStaff?.Id ?? 0;
+                for (const staffEntry of vexFlowMeasure?.staffEntries ?? []) {
+                    for (const label of staffEntry.FingeringEntries ?? []) {
+                        if (!label?.PositionAndShape) {
+                            continue;
+                        }
+                        const rect: CollisionRect = CollisionModel.rectFromBoundingBox(label.PositionAndShape);
+                        if (!CollisionModel.isUsableRect(rect)) {
+                            continue;
+                        }
+
+                        const key: string = this.getInternalCollisionDebugKey(`label:${label.Label?.text ?? ""}`, kind, vexFlowMeasure, staffId, rect);
+                        if (renderedKeys.has(key)) {
+                            continue;
+                        }
+                        renderedKeys.add(key);
+
+                        boxes.push({
+                            key,
+                            kind,
+                            measure: vexFlowMeasure.MeasureNumber,
+                            staffId,
+                            measureX: vexFlowMeasure.PositionAndShape.RelativePosition.x,
+                            source: "osmd-graphical-label",
+                            fingering: label.Label?.text,
+                            svgRect: {
+                                x: rect.x * unitInPixels,
+                                y: rect.y * unitInPixels,
+                                width: rect.width * unitInPixels,
+                                height: rect.height * unitInPixels
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    private getInternalCollisionDebugKind(collisionBox: CollisionBox, fingeringLabels: Set<GraphicalLabel>): string {
+        switch (collisionBox.kind) {
+            case CollisionBoxKind.Accidental:
+                return "accidental";
+            case CollisionBoxKind.Articulation:
+                return "articulation";
+            case CollisionBoxKind.Notehead:
+                return "notehead";
+            case CollisionBoxKind.Note:
+                return "note";
+            case CollisionBoxKind.Rest:
+                return "rest";
+            case CollisionBoxKind.Beam:
+                return "beam";
+            case CollisionBoxKind.Stem:
+                return "stem";
+            case CollisionBoxKind.Flag:
+                return "flag";
+            case CollisionBoxKind.Dot:
+                return "dot";
+            case CollisionBoxKind.LedgerLine:
+                return "ledger-line";
+            case CollisionBoxKind.StaffLine:
+                return "staff-line";
+            case CollisionBoxKind.MeasureBarline:
+                return "barline";
+            case CollisionBoxKind.Clef:
+                return "clef";
+            case CollisionBoxKind.KeySignature:
+                return "key-signature";
+            case CollisionBoxKind.TimeSignature:
+                return "time-signature";
+            case CollisionBoxKind.Tuplet:
+                return "tuplet";
+            case CollisionBoxKind.Tie:
+                return "tie";
+            case CollisionBoxKind.Slur:
+                return "slur";
+            case CollisionBoxKind.Glissando:
+                return "glissando";
+            case CollisionBoxKind.Ornament:
+                return "ornament";
+            case CollisionBoxKind.Repeat:
+                return "repeat";
+            case CollisionBoxKind.RepeatDot:
+                return "repeat-dot";
+            case CollisionBoxKind.Volta:
+                return "volta";
+            case CollisionBoxKind.Dynamic:
+                return "dynamic";
+            case CollisionBoxKind.Expression:
+                return "expression";
+            case CollisionBoxKind.Text:
+                return "text";
+            case CollisionBoxKind.Label:
+                return "label";
+            case CollisionBoxKind.Lyric:
+                return "lyric";
+            case CollisionBoxKind.ChordSymbol:
+                return "chord-symbol";
+            case CollisionBoxKind.InstrumentLabel:
+                return "instrument-label";
+            case CollisionBoxKind.MeasureNumber:
+                return "measure-number";
+            case CollisionBoxKind.OctaveShift:
+                return "octave-shift";
+            case CollisionBoxKind.Pedal:
+                return "pedal";
+            case CollisionBoxKind.WavyLine:
+                return "wavy-line";
+            case CollisionBoxKind.SystemLine:
+                return "system-line";
+            case CollisionBoxKind.Connector:
+                return "connector";
+            case CollisionBoxKind.Fingering:
+                return fingeringLabels.has(collisionBox.owner as GraphicalLabel) ? "label-placed" : "existing-fingering";
+            case CollisionBoxKind.GenericBoundingBox:
+                return "bounding-box";
+            case CollisionBoxKind.Unknown:
+                return "unknown";
+            default:
+                return `${collisionBox.kind}`.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+        }
+    }
+
+    private findInternalCollisionDebugMeasure(graphicalMusicSheet: GraphicalMusicSheet, rect: CollisionRect): VexFlowMeasure {
+        const centerX: number = rect.x + rect.width / 2;
+        const centerY: number = rect.y + rect.height / 2;
+        let bestMeasure: VexFlowMeasure;
+        let bestDistance: number = Number.POSITIVE_INFINITY;
+
+        for (const measureColumn of graphicalMusicSheet.MeasureList) {
+            for (const measure of measureColumn ?? []) {
+                const vexFlowMeasure: VexFlowMeasure = measure as VexFlowMeasure;
+                if (!vexFlowMeasure?.PositionAndShape) {
+                    continue;
+                }
+                const measureX: number = vexFlowMeasure.PositionAndShape.AbsolutePosition.x;
+                const measureY: number = vexFlowMeasure.PositionAndShape.AbsolutePosition.y;
+                const measureRight: number = measureX + vexFlowMeasure.PositionAndShape.Size.width;
+                const measureBottom: number = measureY + Math.max(vexFlowMeasure.ParentStaff?.StafflineCount - 1, 1);
+                const xPadding: number = 8;
+                const yPadding: number = 6;
+                if (centerX < measureX - xPadding || centerX > measureRight + xPadding ||
+                    centerY < measureY - yPadding || centerY > measureBottom + yPadding) {
+                    continue;
+                }
+
+                const clampedX: number = Math.max(measureX, Math.min(centerX, measureRight));
+                const clampedY: number = Math.max(measureY, Math.min(centerY, measureBottom));
+                const distance: number = Math.abs(centerX - clampedX) + Math.abs(centerY - clampedY);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestMeasure = vexFlowMeasure;
+                }
+            }
+        }
+
+        return bestMeasure;
+    }
+
+    private getInternalCollisionDebugKey(id: number | string, kind: string, measure: VexFlowMeasure, staffId: number, rect: CollisionRect): string {
+        return [
+            id,
+            measure?.MeasureNumber ?? "",
+            staffId,
+            kind,
+            rect.x.toFixed(2),
+            rect.y.toFixed(2),
+            rect.width.toFixed(2),
+            rect.height.toFixed(2)
+        ].join("|");
     }
 
     protected drawPage(page: GraphicalMusicPage): void {
@@ -130,6 +393,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
             }
         }
         super.drawStaffLine(staffLine);
+        this.registerMultiStaffConnectorCollisionBox(staffLine);
         const absolutePos: PointF2D = staffLine.PositionAndShape.AbsolutePosition;
         if (this.rules.RenderSlurs) {
             this.drawSlurs(staffLine as VexFlowStaffLine, absolutePos);
@@ -166,6 +430,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
             // note that we do not add abs.y, because GraphicalGlissando.calculateLine() uses AbsolutePosition for y,
             //   because unfortunately RelativePosition seems imprecise.
             gGliss.Line.SVGElement = this.drawLine(newStart, newEnd, gGliss.Color, gGliss.Width);
+            this.registerLineCollisionBox(newStart, newEnd, Math.max(gGliss.Width, 0.12), CollisionBoxKind.Glissando, gGliss);
         } else {
             const vfTie: VF.StaveTie = (gGliss as VexFlowGlissando).vfTie;
             if (vfTie) {
@@ -178,11 +443,18 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
 
     private drawSlur(graphicalSlur: GraphicalSlur, abs: PointF2D): void {
         const curvePointsInPixels: PointF2D[] = [];
+        const curvePointsInUnits: PointF2D[] = [];
         // 1) create inner or original curve:
         const p1: PointF2D = new PointF2D(graphicalSlur.bezierStartPt.x + abs.x, graphicalSlur.bezierStartPt.y + abs.y);
         const p2: PointF2D = new PointF2D(graphicalSlur.bezierStartControlPt.x + abs.x, graphicalSlur.bezierStartControlPt.y + abs.y);
         const p3: PointF2D = new PointF2D(graphicalSlur.bezierEndControlPt.x + abs.x, graphicalSlur.bezierEndControlPt.y + abs.y);
         const p4: PointF2D = new PointF2D(graphicalSlur.bezierEndPt.x + abs.x, graphicalSlur.bezierEndPt.y + abs.y);
+        curvePointsInUnits.push(
+            new PointF2D(p1.x, p1.y),
+            new PointF2D(p2.x, p2.y),
+            new PointF2D(p3.x, p3.y),
+            new PointF2D(p4.x, p4.y)
+        );
 
         // put screen transformed points into array
         curvePointsInPixels.push(this.applyScreenTransformation(p1));
@@ -208,6 +480,12 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
             p3.y += 0.3;
             p4.y += 0.05;
         }
+        curvePointsInUnits.push(
+            new PointF2D(p1.x, p1.y),
+            new PointF2D(p2.x, p2.y),
+            new PointF2D(p3.x, p3.y),
+            new PointF2D(p4.x, p4.y)
+        );
 
         // put screen transformed points into array
         curvePointsInPixels.push(this.applyScreenTransformation(p1));
@@ -216,6 +494,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         curvePointsInPixels.push(this.applyScreenTransformation(p4));
         const startNote: VexFlowGraphicalNote = this.rules.GNote(graphicalSlur.slur.StartNote) as VexFlowGraphicalNote;
         graphicalSlur.SVGElement = this.backend.renderCurve(curvePointsInPixels, true, startNote);
+        this.registerPointBoundsCollisionBox(curvePointsInUnits, CollisionBoxKind.Slur, graphicalSlur);
     }
 
     protected drawMeasure(measure: VexFlowMeasure): void {
@@ -486,6 +765,8 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         // Draw InstrumentBrackets at beginning of line
         const vexBrace: VexFlowInstrumentBrace = (brace as VexFlowInstrumentBrace);
         vexBrace.draw(ctx);
+        this.registerInternalCollisionRect(CollisionModel.rectFromBoundingBox(vexBrace.PositionAndShape),
+            CollisionBoxKind.Connector, vexBrace, vexBrace);
         ctx.closeGroup();
     }
 
@@ -495,6 +776,8 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         // Draw InstrumentBrackets at beginning of line
         const vexBrace: VexFlowInstrumentBracket = (bracket as VexFlowInstrumentBracket);
         vexBrace.draw(ctx);
+        this.registerInternalCollisionRect(CollisionModel.rectFromBoundingBox(vexBrace.PositionAndShape),
+            CollisionBoxKind.Connector, vexBrace, vexBrace);
         ctx.closeGroup();
     }
 
@@ -593,9 +876,111 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
                 const end: PointF2D = new PointF2D(graphicalExpression.ParentStaffLine.PositionAndShape.AbsolutePosition.x + line.End.x,
                                                    graphicalExpression.ParentStaffLine.PositionAndShape.AbsolutePosition.y + line.End.y);
                 line.SVGElement = this.drawLine(start, end, line.colorHex ?? "#000000", line.Width);
+                this.registerLineCollisionBox(start, end, Math.max(line.Width, 0.12), CollisionBoxKind.Dynamic, graphicalExpression, line);
                 // the null check for colorHex is not strictly necessary anymore, but the previous default color was red.
             }
         }
+    }
+
+    private registerLineCollisionBox(start: PointF2D, end: PointF2D, width: number, kind: CollisionBoxKind,
+                                     owner?: Object, source?: Object): void {
+        const halfWidth: number = Math.max(width / 2, 0.03);
+        this.registerInternalCollisionRect({
+            x: Math.min(start.x, end.x) - halfWidth,
+            y: Math.min(start.y, end.y) - halfWidth,
+            width: Math.abs(end.x - start.x) + halfWidth * 2,
+            height: Math.abs(end.y - start.y) + halfWidth * 2,
+        }, kind, owner, source);
+    }
+
+    private registerPointBoundsCollisionBox(points: PointF2D[], kind: CollisionBoxKind, owner?: Object, source?: Object): void {
+        const xs: number[] = points.map((point: PointF2D) => point.x).filter((value: number) => Number.isFinite(value));
+        const ys: number[] = points.map((point: PointF2D) => point.y).filter((value: number) => Number.isFinite(value));
+        if (xs.length === 0 || ys.length === 0) {
+            return;
+        }
+        const padding: number = 0.12;
+        this.registerInternalCollisionRect({
+            x: Math.min(...xs) - padding,
+            y: Math.min(...ys) - padding,
+            width: Math.max(...xs) - Math.min(...xs) + padding * 2,
+            height: Math.max(...ys) - Math.min(...ys) + padding * 2,
+        }, kind, owner, source);
+    }
+
+    private registerInternalCollisionRect(rect: CollisionRect, kind: CollisionBoxKind, owner?: Object, source?: Object): void {
+        this.graphicalMusicSheet?.CollisionModel?.registerRect(rect, kind, owner, source);
+    }
+
+    private registerMultiStaffConnectorCollisionBox(staffLine: StaffLine): void {
+        const musicSystem: MusicSystem = staffLine.ParentMusicSystem;
+        const instrument: any = staffLine.ParentStaff?.ParentInstrument;
+        if (!musicSystem || !instrument) {
+            return;
+        }
+        const instrumentStaffLines: StaffLine[] = musicSystem.StaffLines.filter((line: StaffLine) =>
+            line.ParentStaff?.ParentInstrument === instrument &&
+            (!line.ParentStaff || line.ParentStaff.isVisible()));
+        if (instrumentStaffLines.length < 2 || instrumentStaffLines[0] !== staffLine) {
+            return;
+        }
+
+        const key: string = `${musicSystem.Id}:${instrument.Id ?? instrument.Name ?? "instrument"}`;
+        if (this.registeredSystemConnectorKeys.has(key)) {
+            return;
+        }
+        this.registeredSystemConnectorKeys.add(key);
+
+        const firstLine: StaffLine = instrumentStaffLines[0];
+        const lastLine: StaffLine = instrumentStaffLines[instrumentStaffLines.length - 1];
+        const firstMeasure: VexFlowMeasure = firstLine.Measures?.[0] as VexFlowMeasure;
+        if (!firstMeasure?.PositionAndShape) {
+            return;
+        }
+
+        const topY: number = firstLine.PositionAndShape.AbsolutePosition.y - 0.4;
+        const bottomY: number = lastLine.PositionAndShape.AbsolutePosition.y + Math.max(lastLine.ParentStaff?.StafflineCount - 1, 1) + 0.4;
+        this.registerInternalCollisionRect({
+            x: firstMeasure.PositionAndShape.AbsolutePosition.x - 3.1,
+            y: topY,
+            width: 2.6,
+            height: bottomY - topY,
+        }, CollisionBoxKind.Connector, instrument, musicSystem);
+    }
+
+    private registerGraphicalLabelCollisionBox(graphicalLabel: GraphicalLabel): void {
+        if (!graphicalLabel?.PositionAndShape) {
+            return;
+        }
+        this.registerInternalCollisionRect(CollisionModel.rectFromBoundingBox(graphicalLabel.PositionAndShape),
+            this.classifyGraphicalLabel(graphicalLabel), graphicalLabel, graphicalLabel);
+    }
+
+    private classifyGraphicalLabel(graphicalLabel: GraphicalLabel): CollisionBoxKind {
+        const labelText: string = graphicalLabel.Label?.text ?? "";
+        const parentDataObject: any = graphicalLabel.PositionAndShape?.Parent?.DataObject;
+        const parentClassName: string = parentDataObject?.constructor?.name ?? "";
+        if (/^\s*\d+\s*$/.test(labelText)) {
+            return parentClassName.indexOf("StaffLine") >= 0
+                ? CollisionBoxKind.Fingering
+                : CollisionBoxKind.MeasureNumber;
+        }
+        if (parentClassName.indexOf("Lyric") >= 0) {
+            return CollisionBoxKind.Lyric;
+        }
+        if (parentClassName.indexOf("ChordSymbol") >= 0) {
+            return CollisionBoxKind.ChordSymbol;
+        }
+        if (parentClassName.indexOf("MusicSystem") >= 0) {
+            return CollisionBoxKind.InstrumentLabel;
+        }
+        if (parentClassName.indexOf("Dynamic") >= 0) {
+            return CollisionBoxKind.Dynamic;
+        }
+        if (parentClassName.indexOf("Expression") >= 0) {
+            return CollisionBoxKind.Expression;
+        }
+        return CollisionBoxKind.Label;
     }
 
     /**
@@ -650,6 +1035,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
             }
         }
         // font currently unused, replaced by fontFamily
+        this.registerGraphicalLabelCollisionBox(graphicalLabel);
         return node; // alternatively, return Node[] and refactor annotationElementMap to handle node array instead of single node
     }
 

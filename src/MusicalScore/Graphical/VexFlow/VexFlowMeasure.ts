@@ -706,7 +706,9 @@ export class VexFlowMeasure extends GraphicalMeasure {
 
         // Draw stave lines
         this.stave.setContext(ctx).draw();
+        this.registerStaffLineCollisionBoxes();
         this.registerMeasureBarlineCollisionBoxes();
+        this.registerStaveModifierCollisionBoxes();
         this.optimizeBeamStemDirectionCombinations();
         // Draw all voices
         for (const voiceID in this.vfVoices) {
@@ -768,6 +770,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                             (vftuplet as any).RenderTupletNumber = true;
                         }
                         vftuplet.setContext(ctx).draw();
+                        this.registerTupletCollisionBox(vftuplet);
                     }
                 }
             }
@@ -1898,6 +1901,26 @@ export class VexFlowMeasure extends GraphicalMeasure {
         return this.ParentStaffLine?.ParentMusicSystem?.Parent?.Parent?.CollisionModel;
     }
 
+    private registerStaffLineCollisionBoxes(): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel) {
+            return;
+        }
+        const lineWidth: number = Math.max(this.rules.StaffLineWidth, 0.04);
+        const x: number = this.PositionAndShape.AbsolutePosition.x;
+        const y: number = this.PositionAndShape.AbsolutePosition.y;
+        const width: number = this.PositionAndShape.Size.width;
+        const lineCount: number = Math.max(this.ParentStaff?.StafflineCount ?? 5, 1);
+        for (let lineIndex: number = 0; lineIndex < lineCount; lineIndex++) {
+            collisionModel.registerRect({
+                x,
+                y: y + lineIndex - lineWidth / 2,
+                width,
+                height: lineWidth,
+            }, CollisionBoxKind.StaffLine, this, this.stave);
+        }
+    }
+
     private registerMeasureBarlineCollisionBoxes(): void {
         const collisionModel: CollisionModel = this.getCollisionModel();
         if (!collisionModel) {
@@ -1942,8 +1965,11 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 height: sample.bottomY - sample.topY,
             }), CollisionBoxKind.Stem, sample.staveNote, sample.staveNote);
         }
-        for (const tickable of this.getAllTickables()) {
+        const tickables: any[] = this.getAllTickables();
+        for (const tickable of tickables) {
             this.registerVexFlowElementCollisionBox(tickable, this.classifyVexFlowElement(tickable));
+            this.registerLedgerLineCollisionBoxes(tickable);
+            this.registerFlagCollisionBox(tickable);
             const modifiers: any[] = typeof tickable?.getModifiers === "function" ? tickable.getModifiers() : tickable?.modifiers;
             if (!Array.isArray(modifiers)) {
                 continue;
@@ -1954,13 +1980,35 @@ export class VexFlowMeasure extends GraphicalMeasure {
         }
     }
 
-    private registerVexFlowElementCollisionBox(element: any, kind: CollisionBoxKind): void {
+    private registerStaveModifierCollisionBoxes(): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        const modifiers: any[] = this.stave?.getModifiers?.() ?? [];
+        if (!collisionModel || !modifiers.length) {
+            return;
+        }
+        for (let index: number = 0; index < modifiers.length; index++) {
+            const modifier: any = modifiers[index];
+            const kind: CollisionBoxKind = this.classifyVexFlowElement(modifier);
+            if (kind === CollisionBoxKind.MeasureBarline) {
+                this.registerRepeatDotCollisionBoxes(modifier);
+            }
+            if (this.registerVexFlowElementCollisionBox(modifier, kind)) {
+                continue;
+            }
+            const rect: CollisionRect = this.getVexFlowStaveModifierFallbackRect(modifier, index);
+            if (rect) {
+                collisionModel.registerRect(this.rectPxToUnit(rect), kind, modifier, modifier);
+            }
+        }
+    }
+
+    private registerVexFlowElementCollisionBox(element: any, kind: CollisionBoxKind): boolean {
         const collisionModel: CollisionModel = this.getCollisionModel();
         const rect: CollisionRect = this.getVexFlowElementRect(element);
         if (!collisionModel || !rect) {
-            return;
+            return false;
         }
-        collisionModel.registerRect(this.rectPxToUnit(rect), kind, element, element);
+        return collisionModel.registerRect(this.rectPxToUnit(rect), kind, element, element) !== undefined;
     }
 
     private getVexFlowElementRect(element: any): CollisionRect {
@@ -1975,18 +2023,266 @@ export class VexFlowMeasure extends GraphicalMeasure {
         }
         const x: number = typeof box.getX === "function" ? box.getX() : box.x;
         const y: number = typeof box.getY === "function" ? box.getY() : box.y;
-        const width: number = typeof box.getW === "function" ? box.getW() : box.w;
-        const height: number = typeof box.getH === "function" ? box.getH() : box.h;
+        const width: number = typeof box.getW === "function" ? box.getW() : box.w ?? box.width;
+        const height: number = typeof box.getH === "function" ? box.getH() : box.h ?? box.height;
         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
             return undefined;
         }
         return { x, y, width, height };
     }
 
+    private registerRepeatDotCollisionBoxes(barline: any): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel || !barline || !this.stave) {
+            return;
+        }
+        const type: number = Number(typeof barline.getType === "function" ? barline.getType() : barline.type);
+        const barlineTypes: any = (VF.Barline as any).type;
+        const hasBeginDots: boolean = type === barlineTypes?.REPEAT_BEGIN || type === barlineTypes?.REPEAT_BOTH;
+        const hasEndDots: boolean = type === barlineTypes?.REPEAT_END || type === barlineTypes?.REPEAT_BOTH;
+        if (!hasBeginDots && !hasEndDots) {
+            return;
+        }
+        const stave: any = this.stave as any;
+        const x: number = Number(typeof barline.getX === "function" ? barline.getX() : barline.x);
+        const topY: number = Number(stave.getTopLineTopY?.());
+        const spacing: number = Number(stave.getSpacingBetweenLines?.());
+        const lineCount: number = Number(stave.getNumLines?.() ?? this.ParentStaff?.StafflineCount ?? 5);
+        if (!Number.isFinite(x) || !Number.isFinite(topY) || !Number.isFinite(spacing) || !Number.isFinite(lineCount)) {
+            return;
+        }
+        const dotRadius: number = 2;
+        const yOffset: number = (((lineCount - 1) * spacing) / 2) - (spacing / 2);
+        const addDotPair: (begin: boolean) => void = (begin: boolean): void => {
+            let xShift: number = begin ? 3 : -5;
+            xShift += begin ? 4 : -4;
+            const dotX: number = x + xShift + dotRadius / 2;
+            const topDotY: number = topY + yOffset + dotRadius / 2;
+            for (const dotY of [topDotY, topDotY + spacing]) {
+                collisionModel.registerRect(this.rectPxToUnit({
+                    x: dotX - dotRadius,
+                    y: dotY - dotRadius,
+                    width: dotRadius * 2,
+                    height: dotRadius * 2,
+                }), CollisionBoxKind.RepeatDot, barline, barline);
+            }
+        };
+        if (hasBeginDots) {
+            addDotPair(true);
+        }
+        if (hasEndDots) {
+            addDotPair(false);
+        }
+    }
+
+    private getVexFlowStaveModifierFallbackRect(modifier: any, index: number): CollisionRect {
+        if (!modifier || !this.stave) {
+            return undefined;
+        }
+        const category: string = this.getVexFlowElementCategory(modifier);
+        const xShift: number = Number((this.stave as any)?.getModifierXShift?.(index) ?? 0);
+        const modifierX: number = Number(
+            (typeof modifier.getX === "function" ? modifier.getX() : modifier.x)
+            ?? this.stave.getX?.() ?? this.PositionAndShape.AbsolutePosition.x * unitInPixels
+        );
+        const width: number = Number(
+            (typeof modifier.getWidth === "function" ? modifier.getWidth() : modifier.width) ?? 0
+        );
+        const x: number = modifierX + (Number.isFinite(xShift) ? xShift : 0);
+        const staveTop: number = Number((this.stave as any).getYForLine?.(0) ?? this.PositionAndShape.AbsolutePosition.y * unitInPixels);
+        const staveBottom: number = Number((this.stave as any).getYForLine?.((this.ParentStaff?.StafflineCount ?? 5) - 1) ?? staveTop + 4 * unitInPixels);
+        if (!Number.isFinite(x) || !Number.isFinite(width) || width <= 0) {
+            return undefined;
+        }
+        if (category === "voltas") {
+            const topY: number = Number((this.stave as any).getYForTopText?.((this.stave as any).options?.num_lines ?? 5) ?? staveTop - 30) +
+                Number(modifier.y_shift ?? 0);
+            const voltaWidth: number = Math.max(Number((this.stave as any).width ?? this.PositionAndShape.Size.width * unitInPixels) - xShift, width);
+            return {
+                x,
+                y: topY,
+                width: voltaWidth,
+                height: 24,
+            };
+        }
+        if (category === "repetitions") {
+            const topY: number = Number((this.stave as any).getYForTopText?.
+            ((this.stave as any).options?.num_lines ?? 5) ?? staveTop - 30) + Number(modifier.y_shift ?? 0);
+            return {
+                x,
+                y: topY,
+                width: Math.max(width, 28),
+                height: 44,
+            };
+        }
+        if (category === "barlines") {
+            return {
+                x,
+                y: staveTop,
+                width: Math.max(width, unitInPixels * 0.08),
+                height: Math.max(staveBottom - staveTop, unitInPixels),
+            };
+        }
+        return {
+            x,
+            y: staveTop - unitInPixels * 1.6,
+            width: Math.max(width, unitInPixels * 0.6),
+            height: Math.max(staveBottom - staveTop + unitInPixels * 3.2, unitInPixels),
+        };
+    }
+
+    private registerLedgerLineCollisionBoxes(staveNote: any): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel || !staveNote || typeof staveNote.isRest !== "function" || staveNote.isRest()) {
+            return;
+        }
+        const stave: any = typeof staveNote.getStave === "function" ? staveNote.getStave() : staveNote.stave;
+        const glyph: any = typeof staveNote.getGlyph === "function" ? staveNote.getGlyph() : staveNote.glyph;
+        if (!stave || !glyph || typeof staveNote.getNoteHeadBounds !== "function") {
+            return;
+        }
+        const bounds: any = staveNote.getNoteHeadBounds();
+        const highestLine: number = bounds?.highest_line;
+        const lowestLine: number = bounds?.lowest_line;
+        if (!Number.isFinite(highestLine) || !Number.isFinite(lowestLine) ||
+            (highestLine < 6 && lowestLine > 0)) {
+            return;
+        }
+
+        const strokePx: number = Math.max(Number(staveNote.render_options?.stroke_px ?? 3), 1);
+        const glyphWidth: number = Math.max(Number(glyph.getWidth?.() ?? staveNote.getGlyphWidth?.() ?? 10), 1);
+        const width: number = glyphWidth + strokePx * 2;
+        const doubleWidth: number = 2 * (glyphWidth + strokePx) - 0.5;
+        const displacedX: number = bounds.displaced_x;
+        const nonDisplacedX: number = bounds.non_displaced_x;
+        const minX: number = Math.min(
+            Number.isFinite(displacedX) ? displacedX : Number.POSITIVE_INFINITY,
+            Number.isFinite(nonDisplacedX) ? nonDisplacedX : Number.POSITIVE_INFINITY
+        );
+
+        const addLedgerLine: (line: number, normal: boolean, displaced: boolean) => void =
+            (line: number, normal: boolean, displaced: boolean): void => {
+                const lineY: number = Number(stave.getYForNote?.(line));
+                if (!Number.isFinite(lineY)) {
+                    return;
+                }
+                let x: number;
+                if (displaced && normal) {
+                    x = minX - strokePx;
+                } else if (normal) {
+                    x = nonDisplacedX - strokePx;
+                } else {
+                    x = displacedX - strokePx;
+                }
+                const ledgerWidth: number = displaced && normal ? doubleWidth : width;
+                if (!Number.isFinite(x) || !Number.isFinite(ledgerWidth)) {
+                    return;
+                }
+                collisionModel.registerRect(this.rectPxToUnit({
+                    x,
+                    y: lineY - Math.max(this.rules.StaffLineWidth * unitInPixels, 1) / 2,
+                    width: ledgerWidth,
+                    height: Math.max(this.rules.StaffLineWidth * unitInPixels, 1),
+                }), CollisionBoxKind.LedgerLine, staveNote, staveNote);
+            };
+
+        for (let line: number = 6; line <= highestLine; line++) {
+            addLedgerLine(
+                line,
+                Number.isFinite(nonDisplacedX) && line <= bounds.highest_non_displaced_line,
+                Number.isFinite(displacedX) && line <= bounds.highest_displaced_line
+            );
+        }
+        for (let line: number = 0; line >= lowestLine; line--) {
+            addLedgerLine(
+                line,
+                Number.isFinite(nonDisplacedX) && line >= bounds.lowest_non_displaced_line,
+                Number.isFinite(displacedX) && line >= bounds.lowest_displaced_line
+            );
+        }
+    }
+
+    private registerFlagCollisionBox(staveNote: any): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel || !staveNote || typeof staveNote.hasFlag !== "function" || !staveNote.hasFlag()) {
+            return;
+        }
+        if (typeof staveNote.getStemX !== "function" || typeof staveNote.getNoteHeadBounds !== "function") {
+            return;
+        }
+        const bounds: any = staveNote.getNoteHeadBounds();
+        const stem: any = typeof staveNote.getStem === "function" ? staveNote.getStem() : staveNote.stem;
+        const stemHeight: number = Number(stem?.getHeight?.() ?? stem?.height ?? 0);
+        const flagX: number = Number(staveNote.getStemX());
+        const flagY: number = Number(staveNote.getStemDirection?.()) === -1
+            ? Number(bounds?.y_top) - stemHeight + 2
+            : Number(bounds?.y_bottom) - stemHeight - 2;
+        const flagMetrics: any = staveNote.flag?.getMetrics?.();
+        const width: number = Math.max(Number(flagMetrics?.width ?? unitInPixels * 0.9), unitInPixels * 0.6);
+        const height: number = Math.max(Number(flagMetrics?.height ?? unitInPixels * 2.6), unitInPixels * 1.8);
+        if (!Number.isFinite(flagX) || !Number.isFinite(flagY)) {
+            return;
+        }
+        collisionModel.registerRect(this.rectPxToUnit({
+            x: Number(staveNote.getStemDirection?.()) === -1 ? flagX - width : flagX,
+            y: flagY - height * 0.65,
+            width,
+            height,
+        }), CollisionBoxKind.Flag, staveNote, staveNote);
+    }
+
+    private registerTupletCollisionBox(vfTuplet: VF.Tuplet): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        const tuplet: any = vfTuplet as any;
+        if (!collisionModel || !tuplet) {
+            return;
+        }
+        if (this.registerVexFlowElementCollisionBox(tuplet, CollisionBoxKind.Tuplet)) {
+            return;
+        }
+        const x: number = Number(tuplet.x_pos);
+        const y: number = Number(tuplet.y_pos);
+        const width: number = Number(tuplet.width);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || width <= 0) {
+            return;
+        }
+        const bracketHeight: number = Math.abs(Number(tuplet.location ?? 1) * 10);
+        collisionModel.registerRect(this.rectPxToUnit({
+            x,
+            y: y - 12,
+            width,
+            height: Math.max(bracketHeight + 24, unitInPixels),
+        }), CollisionBoxKind.Tuplet, vfTuplet, vfTuplet);
+    }
+
+    private getVexFlowElementCategory(element: any): string {
+        return ((typeof element?.getCategory === "function" ? element.getCategory() : element?.category) ?? "").toLowerCase();
+    }
+
     private classifyVexFlowElement(element: any): CollisionBoxKind {
-        const category: string = typeof element?.getCategory === "function" ? element.getCategory() : element?.category;
+        const category: string = this.getVexFlowElementCategory(element);
         const constructorName: string = element?.constructor?.name ?? "";
-        const descriptor: string = `${category ?? ""} ${constructorName}`.toLowerCase();
+        const attributeType: string = typeof element?.getAttribute === "function" ? element.getAttribute("type") : element?.attrs?.type;
+        const descriptor: string = `${category ?? ""} ${constructorName} ${attributeType ?? ""}`.toLowerCase();
+        if (descriptor.indexOf("barline") >= 0 || descriptor.indexOf("barlines") >= 0) {
+            return CollisionBoxKind.MeasureBarline;
+        }
+        if (descriptor.indexOf("clef") >= 0) {
+            return CollisionBoxKind.Clef;
+        }
+        if (descriptor.indexOf("keysignature") >= 0 || descriptor.indexOf("keysignature") >= 0 ||
+            descriptor.indexOf("keysignatures") >= 0) {
+            return CollisionBoxKind.KeySignature;
+        }
+        if (descriptor.indexOf("timesignature") >= 0 || descriptor.indexOf("timesignatures") >= 0) {
+            return CollisionBoxKind.TimeSignature;
+        }
+        if (descriptor.indexOf("accidental") >= 0) {
+            return CollisionBoxKind.Accidental;
+        }
+        if (descriptor.indexOf("dot") >= 0) {
+            return CollisionBoxKind.Dot;
+        }
         if (descriptor.indexOf("finger") >= 0 || descriptor.indexOf("stringnumber") >= 0) {
             return CollisionBoxKind.Fingering;
         }
@@ -1999,8 +2295,20 @@ export class VexFlowMeasure extends GraphicalMeasure {
         if (descriptor.indexOf("tuplet") >= 0) {
             return CollisionBoxKind.Tuplet;
         }
-        if (descriptor.indexOf("note") >= 0) {
+        if (descriptor.indexOf("repetition") >= 0 || descriptor.indexOf("repeat") >= 0) {
+            return CollisionBoxKind.Repeat;
+        }
+        if (descriptor.indexOf("volta") >= 0) {
+            return CollisionBoxKind.Volta;
+        }
+        if (descriptor.indexOf("rest") >= 0 || (typeof element?.isRest === "function" && element.isRest())) {
+            return CollisionBoxKind.Rest;
+        }
+        if (descriptor.indexOf("notehead") >= 0) {
             return CollisionBoxKind.Notehead;
+        }
+        if (descriptor.indexOf("note") >= 0) {
+            return CollisionBoxKind.Note;
         }
         return CollisionBoxKind.GenericBoundingBox;
     }

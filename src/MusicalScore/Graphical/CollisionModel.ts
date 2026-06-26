@@ -3,17 +3,45 @@ import { BoundingBox } from "./BoundingBox";
 import type { GraphicalMusicSheet } from "./GraphicalMusicSheet";
 
 export enum CollisionBoxKind {
+    Accidental = "Accidental",
     Articulation = "Articulation",
     Beam = "Beam",
+    ChordSymbol = "ChordSymbol",
+    Clef = "Clef",
+    Connector = "Connector",
+    Dot = "Dot",
+    Dynamic = "Dynamic",
+    Expression = "Expression",
+    Flag = "Flag",
     GenericBoundingBox = "BoundingBox",
     Fingering = "Fingering",
+    Glissando = "Glissando",
+    InstrumentLabel = "InstrumentLabel",
+    KeySignature = "KeySignature",
+    Label = "Label",
+    LedgerLine = "LedgerLine",
+    Lyric = "Lyric",
     MeasureBarline = "MeasureBarline",
+    MeasureNumber = "MeasureNumber",
+    Note = "Note",
     Notehead = "Notehead",
     Ornament = "Ornament",
+    OctaveShift = "OctaveShift",
+    Pedal = "Pedal",
+    Repeat = "Repeat",
+    RepeatDot = "RepeatDot",
+    Rest = "Rest",
+    Slur = "Slur",
+    StaffLine = "StaffLine",
     Stem = "Stem",
+    SystemLine = "SystemLine",
+    Text = "Text",
     Tie = "Tie",
+    TimeSignature = "TimeSignature",
     Tuplet = "Tuplet",
     Unknown = "Unknown",
+    Volta = "Volta",
+    WavyLine = "WavyLine",
 }
 
 export interface CollisionRect {
@@ -274,19 +302,62 @@ export class CollisionModel {
     }
 
     private classifyBoundingBox(boundingBox: BoundingBox): CollisionBoxKind {
-        const className: string = (boundingBox.DataObject as any)?.constructor?.name ?? "";
+        const dataObject: any = boundingBox.DataObject as any;
+        const className: string = dataObject?.constructor?.name ?? "";
+        const parentClassName: string = (boundingBox.Parent?.DataObject as any)?.constructor?.name ?? "";
         if (className.indexOf("Label") >= 0) {
-            const labelText: string = (boundingBox.DataObject as any)?.Label?.text;
+            const labelText: string = dataObject?.Label?.text;
             if (/^\s*\d+\s*$/.test(labelText ?? "")) {
-                return CollisionBoxKind.Fingering;
+                return parentClassName.indexOf("StaffLine") >= 0
+                    ? CollisionBoxKind.Fingering
+                    : CollisionBoxKind.MeasureNumber;
             }
-            return CollisionBoxKind.GenericBoundingBox;
+            if (parentClassName.indexOf("Lyric") >= 0) {
+                return CollisionBoxKind.Lyric;
+            }
+            if (parentClassName.indexOf("ChordSymbol") >= 0) {
+                return CollisionBoxKind.ChordSymbol;
+            }
+            if (parentClassName.indexOf("MusicSystem") >= 0) {
+                return CollisionBoxKind.InstrumentLabel;
+            }
+            return CollisionBoxKind.Label;
         }
         if (className.indexOf("Note") >= 0) {
+            if (typeof dataObject?.sourceNote?.isRest === "function" && dataObject.sourceNote.isRest()) {
+                return CollisionBoxKind.Rest;
+            }
             return CollisionBoxKind.Notehead;
         }
-        if (className.indexOf("Slur") >= 0 || className.indexOf("Tie") >= 0) {
+        if (className.indexOf("Slur") >= 0) {
+            return CollisionBoxKind.Slur;
+        }
+        if (className.indexOf("Tie") >= 0) {
             return CollisionBoxKind.Tie;
+        }
+        if (className.indexOf("Glissando") >= 0) {
+            return CollisionBoxKind.Glissando;
+        }
+        if (className.indexOf("OctaveShift") >= 0) {
+            return CollisionBoxKind.OctaveShift;
+        }
+        if (className.indexOf("Pedal") >= 0) {
+            return CollisionBoxKind.Pedal;
+        }
+        if (className.indexOf("WavyLine") >= 0 || className.indexOf("Vibrato") >= 0) {
+            return CollisionBoxKind.WavyLine;
+        }
+        if (className.indexOf("DynamicExpression") >= 0) {
+            return CollisionBoxKind.Dynamic;
+        }
+        if (className.indexOf("Expression") >= 0) {
+            return CollisionBoxKind.Expression;
+        }
+        if (className.indexOf("SystemLine") >= 0) {
+            return CollisionBoxKind.SystemLine;
+        }
+        if (className.indexOf("InstrumentBracket") >= 0 || className.indexOf("InstrumentBrace") >= 0) {
+            return CollisionBoxKind.Connector;
         }
         return CollisionBoxKind.GenericBoundingBox;
     }

@@ -85,6 +85,10 @@ interface FingeringCollisionRect {
     soft?: boolean;
     isFingering?: boolean;
     kind?: string;
+    debugMeasure?: number;
+    debugMeasureX?: number;
+    debugStaffId?: number;
+    debugKey?: string;
 }
 
 interface FingeringDebugSvgRect {
@@ -99,6 +103,29 @@ interface FingeringDebugRect extends FingeringCollisionRect {
     svgRect?: FingeringDebugSvgRect;
     overlapsInitialLabel?: boolean;
     overlapsPlacedLabel?: boolean;
+}
+
+type InternalCollisionDebugKind =
+    "beam" | "stem" | "note" | "notehead" | "barline" | "existing-fingering" |
+    "label-initial" | "label-placed" | "tie" | "ornament-reserve";
+
+interface InternalCollisionDebugBox {
+    key: string;
+    kind: InternalCollisionDebugKind;
+    measure: number;
+    staffId: number;
+    measureX: number;
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    source: "fingering-calculator";
+    collision?: boolean;
+    reason?: string;
+    fingering?: string;
+    placement?: string;
+    stackIndex?: number;
+    svgRect?: FingeringDebugSvgRect;
 }
 
 /**
@@ -122,6 +149,8 @@ export abstract class MusicSheetCalculator {
     protected musicSystems: MusicSystem[];
 
     private abstractNotImplementedErrorMessage: string = "abstract, not implemented";
+    private fingeringInternalDebugBoxesByKey: Map<string, InternalCollisionDebugBox> =
+        new Map<string, InternalCollisionDebugBox>();
 
     public static get TextMeasurer(): ITextMeasurer {
         return MusicSheetCalculator.textMeasurer;
@@ -3383,6 +3412,18 @@ export abstract class MusicSheetCalculator {
         rects.push(rect);
     }
 
+    private withFingeringDebugSource(rect: FingeringCollisionRect, measure: GraphicalMeasure,
+                                     line: StaffLine, debugKey?: string): FingeringCollisionRect {
+        if (!rect) {
+            return rect;
+        }
+        rect.debugMeasure = measure?.MeasureNumber;
+        rect.debugMeasureX = measure?.PositionAndShape?.RelativePosition?.x;
+        rect.debugStaffId = line?.ParentStaff?.Id;
+        rect.debugKey = debugKey ?? rect.debugKey;
+        return rect;
+    }
+
     private expandFingeringRect(rect: FingeringCollisionRect, padding: number): FingeringCollisionRect {
         return {
             left: rect.left - padding,
@@ -3393,7 +3434,11 @@ export abstract class MusicSheetCalculator {
             maxShift: rect.maxShift,
             soft: rect.soft,
             isFingering: rect.isFingering,
-            kind: rect.kind
+            kind: rect.kind,
+            debugMeasure: rect.debugMeasure,
+            debugMeasureX: rect.debugMeasureX,
+            debugStaffId: rect.debugStaffId,
+            debugKey: rect.debugKey
         };
     }
 
@@ -3407,7 +3452,11 @@ export abstract class MusicSheetCalculator {
             maxShift: rect.maxShift,
             soft: rect.soft,
             isFingering: rect.isFingering,
-            kind: rect.kind
+            kind: rect.kind,
+            debugMeasure: rect.debugMeasure,
+            debugMeasureX: rect.debugMeasureX,
+            debugStaffId: rect.debugStaffId,
+            debugKey: rect.debugKey
         };
     }
 
@@ -3484,7 +3533,11 @@ export abstract class MusicSheetCalculator {
             maxShift: rect.maxShift,
             soft: rect.soft,
             isFingering: rect.isFingering,
-            kind: rect.kind
+            kind: rect.kind,
+            debugMeasure: rect.debugMeasure,
+            debugMeasureX: rect.debugMeasureX,
+            debugStaffId: rect.debugStaffId,
+            debugKey: rect.debugKey
         };
     }
 
@@ -3496,16 +3549,18 @@ export abstract class MusicSheetCalculator {
     }
 
     private addFingeringNoteCollisionRects(rects: FingeringCollisionRect[], graphicalNote: GraphicalNote,
-                                           line: StaffLine): void {
+                                           line: StaffLine, measure: GraphicalMeasure): void {
         const noteRect: FingeringCollisionRect = this.getBoundingBoxRectInStaffLine(graphicalNote.PositionAndShape, line, true);
         if (noteRect) {
             noteRect.kind = "note";
         }
-        this.addRectIfValid(rects, noteRect);
-        this.addFingeringStemCollisionRect(rects, graphicalNote);
+        const noteId: string = (graphicalNote as any)?.getSVGId?.();
+        this.addRectIfValid(rects, this.withFingeringDebugSource(noteRect, measure, line, noteId ? `note:${noteId}` : undefined));
+        this.addFingeringStemCollisionRect(rects, graphicalNote, measure, line);
     }
 
-    private addFingeringStemCollisionRect(rects: FingeringCollisionRect[], graphicalNote: GraphicalNote): void {
+    private addFingeringStemCollisionRect(rects: FingeringCollisionRect[], graphicalNote: GraphicalNote,
+                                          measure: GraphicalMeasure, line: StaffLine): void {
         if (!graphicalNote || graphicalNote.sourceNote?.isRest()) {
             return;
         }
@@ -3536,14 +3591,15 @@ export abstract class MusicSheetCalculator {
         if (bottom < -4 || top > this.rules.StaffHeight + 4) {
             return;
         }
-        this.addRectIfValid(rects, {
+        const noteId: string = (graphicalNote as any)?.getSVGId?.();
+        this.addRectIfValid(rects, this.withFingeringDebugSource({
             left: stemStaffX - stemWidth / 2,
             right: stemStaffX + stemWidth / 2,
             top,
             bottom,
             penalty: 1,
             kind: "stem"
-        });
+        }, measure, line, noteId ? `stem:${noteId}` : undefined));
     }
 
     private getVexFlowStaveOriginPx(vfElement: any): { x: number, y: number } {
@@ -3556,7 +3612,8 @@ export abstract class MusicSheetCalculator {
         };
     }
 
-    private addFingeringBeamCollisionRects(rects: FingeringCollisionRect[], measure: GraphicalMeasure): void {
+    private addFingeringBeamCollisionRects(rects: FingeringCollisionRect[], measure: GraphicalMeasure,
+                                           line: StaffLine): void {
         const vexFlowMeasure: any = measure as any;
         const beams: any[] = [];
         const vfbeams: any = vexFlowMeasure.vfbeams;
@@ -3575,9 +3632,10 @@ export abstract class MusicSheetCalculator {
         }
 
         const measureX: number = measure.PositionAndShape.RelativePosition.x;
-        for (const beam of beams) {
+        for (let beamIndex: number = 0; beamIndex < beams.length; beamIndex++) {
+            const beam: any = beams[beamIndex];
             const rect: FingeringCollisionRect = this.getFingeringBeamCollisionRect(beam, measureX);
-            this.addRectIfValid(rects, rect);
+            this.addRectIfValid(rects, this.withFingeringDebugSource(rect, measure, line, `beam:${beamIndex}`));
         }
     }
 
@@ -3636,8 +3694,9 @@ export abstract class MusicSheetCalculator {
     }
 
     private addFingeringTieCollisionRects(rects: FingeringCollisionRect[], gse: GraphicalStaffEntry,
-                                          line: StaffLine): void {
-        for (const graphicalTie of gse.GraphicalTies) {
+                                          line: StaffLine, measure: GraphicalMeasure): void {
+        for (let tieIndex: number = 0; tieIndex < gse.GraphicalTies.length; tieIndex++) {
+            const graphicalTie: GraphicalTie = gse.GraphicalTies[tieIndex];
             const startNote: GraphicalNote = graphicalTie.StartNote;
             const endNote: GraphicalNote = graphicalTie.EndNote;
             const startRect: FingeringCollisionRect = startNote ?
@@ -3653,20 +3712,21 @@ export abstract class MusicSheetCalculator {
             const referenceTop: number = Math.min(startRect?.top ?? endRect.top, endRect?.top ?? startRect.top);
             const referenceBottom: number = Math.max(startRect?.bottom ?? endRect.bottom, endRect?.bottom ?? startRect.bottom);
             const centerY: number = tieDirection === PlacementEnum.Below ? referenceBottom + 0.45 : referenceTop - 0.45;
-            this.addRectIfValid(rects, {
+            this.addRectIfValid(rects, this.withFingeringDebugSource({
                 left,
                 right,
                 top: centerY - 0.25,
                 bottom: centerY + 0.25,
                 penalty: 0.8,
                 kind: "tie"
-            });
+            }, measure, line, `tie:${tieIndex}`));
         }
     }
 
     private addFingeringOrnamentReserveRects(rects: FingeringCollisionRect[], gse: GraphicalStaffEntry,
-                                             line: StaffLine): void {
-        for (const voiceEntry of gse.graphicalVoiceEntries) {
+                                             line: StaffLine, measure: GraphicalMeasure): void {
+        for (let voiceEntryIndex: number = 0; voiceEntryIndex < gse.graphicalVoiceEntries.length; voiceEntryIndex++) {
+            const voiceEntry: GraphicalVoiceEntry = gse.graphicalVoiceEntries[voiceEntryIndex];
             if (!voiceEntry.parentVoiceEntry?.OrnamentContainer || voiceEntry.notes.length === 0) {
                 continue;
             }
@@ -3678,14 +3738,14 @@ export abstract class MusicSheetCalculator {
             const ornamentPlacement: PlacementEnum = voiceEntry.parentVoiceEntry.OrnamentContainer.placement;
             const centerX: number = (noteRect.left + noteRect.right) / 2;
             const above: boolean = ornamentPlacement !== PlacementEnum.Below;
-            this.addRectIfValid(rects, {
+            this.addRectIfValid(rects, this.withFingeringDebugSource({
                 left: centerX - 0.85,
                 right: centerX + 0.85,
                 top: above ? noteRect.top - 1.3 : noteRect.bottom + 0.15,
                 bottom: above ? noteRect.top - 0.15 : noteRect.bottom + 1.3,
                 penalty: 0.7,
                 kind: "ornament-reserve"
-            });
+            }, measure, line, `ornament-reserve:${voiceEntryIndex}`));
         }
     }
 
@@ -3698,24 +3758,36 @@ export abstract class MusicSheetCalculator {
         const lastMeasureIndex: number = Math.min(line.Measures.length - 1, currentMeasureIndex + 1);
         for (let measureIndex: number = firstMeasureIndex; measureIndex <= lastMeasureIndex; measureIndex++) {
             const nearbyMeasure: GraphicalMeasure = line.Measures[measureIndex];
-            this.addFingeringBeamCollisionRects(rects, nearbyMeasure);
+            this.addFingeringBeamCollisionRects(rects, nearbyMeasure, line);
             for (const staffEntry of nearbyMeasure.staffEntries) {
                 for (const voiceEntry of staffEntry.graphicalVoiceEntries) {
                     for (const note of voiceEntry.notes) {
-                        this.addFingeringNoteCollisionRects(rects, note, line);
+                        this.addFingeringNoteCollisionRects(rects, note, line, nearbyMeasure);
                     }
                 }
-                for (const existingFingering of staffEntry.FingeringEntries) {
-                    this.addRectIfValid(rects, this.getExistingFingeringCollisionRect(existingFingering, placement));
+                for (let fingeringIndex: number = 0; fingeringIndex < staffEntry.FingeringEntries.length; fingeringIndex++) {
+                    const existingFingering: GraphicalLabel = staffEntry.FingeringEntries[fingeringIndex];
+                    this.addRectIfValid(rects, this.withFingeringDebugSource(
+                        this.getExistingFingeringCollisionRect(existingFingering, placement),
+                        nearbyMeasure,
+                        line,
+                        `existing-fingering:${measureIndex}:${fingeringIndex}`
+                    ));
                 }
-                this.addFingeringOrnamentReserveRects(rects, staffEntry, line);
+                this.addFingeringOrnamentReserveRects(rects, staffEntry, line, nearbyMeasure);
                 if (staffEntry === currentGse) {
-                    this.addFingeringTieCollisionRects(rects, staffEntry, line);
+                    this.addFingeringTieCollisionRects(rects, staffEntry, line, nearbyMeasure);
                 }
             }
         }
-        for (const measureNumberLabel of system.MeasureNumberLabels) {
-            this.addRectIfValid(rects, this.getMeasureNumberRectInStaffLine(measureNumberLabel, line));
+        for (let labelIndex: number = 0; labelIndex < system.MeasureNumberLabels.length; labelIndex++) {
+            const measureNumberLabel: GraphicalLabel = system.MeasureNumberLabels[labelIndex];
+            this.addRectIfValid(rects, this.withFingeringDebugSource(
+                this.getMeasureNumberRectInStaffLine(measureNumberLabel, line),
+                measure,
+                line,
+                `measure-number:${labelIndex}`
+            ));
         }
         return rects;
     }
@@ -3768,14 +3840,22 @@ export abstract class MusicSheetCalculator {
     }
 
     private resetFingeringDebugRecords(): void {
+        this.fingeringInternalDebugBoxesByKey.clear();
         const scope: any = this.getFingeringDebugScope();
         if (!scope) {
             return;
         }
+        const generatedAt: string = new Date().toISOString();
         scope.__osmdFingeringDebug = {
-            generatedAt: new Date().toISOString(),
+            generatedAt,
             unitInPixels: 10,
             placements: []
+        };
+        scope.__osmdInternalCollisionDebug = {
+            generatedAt,
+            unitInPixels: 10,
+            source: "fingering-calculator",
+            boxes: []
         };
     }
 
@@ -3803,6 +3883,199 @@ export abstract class MusicSheetCalculator {
         };
     }
 
+    private getInternalCollisionDebugKind(kind: string): InternalCollisionDebugKind {
+        switch (kind) {
+            case "beam":
+            case "stem":
+            case "note":
+            case "existing-fingering":
+            case "tie":
+            case "ornament-reserve":
+                return kind as InternalCollisionDebugKind;
+            default:
+                return undefined;
+        }
+    }
+
+    private getRoundedInternalCollisionCoordinate(value: number): string {
+        return Number.isFinite(value) ? value.toFixed(3) : "";
+    }
+
+    private getInternalCollisionDebugKey(kind: InternalCollisionDebugKind, measure: number, staffId: number,
+                                         rect: FingeringCollisionRect, debugKey?: string): string {
+        return [
+            measure,
+            staffId,
+            kind,
+            debugKey ?? "",
+            this.getRoundedInternalCollisionCoordinate(rect.left),
+            this.getRoundedInternalCollisionCoordinate(rect.right),
+            this.getRoundedInternalCollisionCoordinate(rect.top),
+            this.getRoundedInternalCollisionCoordinate(rect.bottom)
+        ].join("|");
+    }
+
+    private getInternalCollisionDebugReason(overlapsInitialLabel: boolean, overlapsPlacedLabel: boolean): string {
+        const reasons: string[] = [];
+        if (overlapsInitialLabel) {
+            reasons.push("overlaps-initial-label");
+        }
+        if (overlapsPlacedLabel) {
+            reasons.push("overlaps-placed-label");
+        }
+        return reasons.join(",");
+    }
+
+    private getFingeringPlacementDebugName(placement: PlacementEnum): string {
+        return PlacementEnum[placement] ?? `${placement}`;
+    }
+
+    private addInternalCollisionDebugBox(debugState: any, box: InternalCollisionDebugBox): void {
+        const existing: InternalCollisionDebugBox = this.fingeringInternalDebugBoxesByKey.get(box.key);
+        if (existing) {
+            existing.collision = existing.collision || box.collision;
+            if (box.reason) {
+                const reasons: Set<string> = new Set<string>(
+                    `${existing.reason ?? ""},${box.reason}`.split(",").filter((reason: string) => reason.length > 0)
+                );
+                existing.reason = Array.from(reasons).join(",");
+            }
+            return;
+        }
+
+        this.fingeringInternalDebugBoxesByKey.set(box.key, box);
+        debugState.boxes.push(box);
+    }
+
+    private toInternalCollisionDebugBox(rect: FingeringCollisionRect, kind: InternalCollisionDebugKind,
+                                        line: StaffLine, fallbackMeasure: GraphicalMeasure,
+                                        fingering: TechnicalInstruction, placement: PlacementEnum,
+                                        stackIndex: number, initialLabelRect: FingeringCollisionRect,
+                                        placedLabelRect: FingeringCollisionRect): InternalCollisionDebugBox {
+        const measureNumber: number = rect.debugMeasure ?? fallbackMeasure.MeasureNumber;
+        const staffId: number = rect.debugStaffId ?? line.ParentStaff?.Id ?? 0;
+        const measureX: number = rect.debugMeasureX ?? fallbackMeasure.PositionAndShape.RelativePosition.x;
+        const overlapsInitialLabel: boolean = this.getRectOverlapArea(rect, initialLabelRect) > 0;
+        const overlapsPlacedLabel: boolean = this.getRectOverlapArea(rect, placedLabelRect) > 0;
+        const reason: string = this.getInternalCollisionDebugReason(overlapsInitialLabel, overlapsPlacedLabel);
+        return {
+            key: this.getInternalCollisionDebugKey(kind, measureNumber, staffId, rect, rect.debugKey),
+            kind,
+            measure: measureNumber,
+            staffId,
+            measureX,
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            source: "fingering-calculator",
+            collision: overlapsInitialLabel || overlapsPlacedLabel || undefined,
+            reason: reason || undefined,
+            fingering: fingering.value,
+            placement: this.getFingeringPlacementDebugName(placement),
+            stackIndex,
+            svgRect: this.getFingeringDebugSvgRect(rect, line)
+        };
+    }
+
+    private addInternalLabelDebugBox(debugState: any, kind: "label-initial" | "label-placed",
+                                     rect: FingeringCollisionRect, line: StaffLine, measure: GraphicalMeasure,
+                                     fingering: TechnicalInstruction, placement: PlacementEnum, stackIndex: number,
+                                     collision: boolean): void {
+        const staffId: number = line.ParentStaff?.Id ?? 0;
+        const key: string = this.getInternalCollisionDebugKey(
+            kind,
+            measure.MeasureNumber,
+            staffId,
+            rect,
+            `fingering-label:${fingering.value}:${stackIndex}`
+        );
+        this.addInternalCollisionDebugBox(debugState, {
+            key,
+            kind,
+            measure: measure.MeasureNumber,
+            staffId,
+            measureX: measure.PositionAndShape.RelativePosition.x,
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            source: "fingering-calculator",
+            collision: collision || undefined,
+            reason: collision ? "label-overlap" : undefined,
+            fingering: fingering.value,
+            placement: this.getFingeringPlacementDebugName(placement),
+            stackIndex,
+            svgRect: this.getFingeringDebugSvgRect(rect, line)
+        });
+    }
+
+    private recordInternalCollisionDebugBoxes(fingering: TechnicalInstruction, measure: GraphicalMeasure,
+                                              line: StaffLine, placement: PlacementEnum, stackIndex: number,
+                                              collisionRects: FingeringCollisionRect[],
+                                              initialLabelRect: FingeringCollisionRect,
+                                              placedLabelRect: FingeringCollisionRect): void {
+        const scope: any = this.getFingeringDebugScope();
+        const debugState: any = scope?.__osmdInternalCollisionDebug;
+        if (!debugState?.boxes) {
+            return;
+        }
+
+        let initialLabelCollides: boolean = false;
+        let placedLabelCollides: boolean = false;
+        for (const rect of collisionRects) {
+            const kind: InternalCollisionDebugKind = this.getInternalCollisionDebugKind(rect.kind);
+            if (!kind) {
+                continue;
+            }
+            if (this.getRectOverlapArea(rect, initialLabelRect) > 0) {
+                initialLabelCollides = true;
+            }
+            if (this.getRectOverlapArea(rect, placedLabelRect) > 0) {
+                placedLabelCollides = true;
+            }
+            this.addInternalCollisionDebugBox(
+                debugState,
+                this.toInternalCollisionDebugBox(
+                    rect,
+                    kind,
+                    line,
+                    measure,
+                    fingering,
+                    placement,
+                    stackIndex,
+                    initialLabelRect,
+                    placedLabelRect
+                )
+            );
+        }
+
+        if (initialLabelCollides) {
+            this.addInternalLabelDebugBox(
+                debugState,
+                "label-initial",
+                initialLabelRect,
+                line,
+                measure,
+                fingering,
+                placement,
+                stackIndex,
+                true
+            );
+        }
+        this.addInternalLabelDebugBox(
+            debugState,
+            "label-placed",
+            placedLabelRect,
+            line,
+            measure,
+            fingering,
+            placement,
+            stackIndex,
+            placedLabelCollides
+        );
+    }
+
     private recordFingeringDebugPlacement(label: GraphicalLabel, fingering: TechnicalInstruction, measure: GraphicalMeasure,
                                           line: StaffLine, system: MusicSystem, placement: PlacementEnum,
                                           stackIndex: number, collisionRects: FingeringCollisionRect[],
@@ -3821,7 +4094,7 @@ export abstract class MusicSheetCalculator {
             systemIndex: this.musicSystems.indexOf(system),
             staffLineIndex: system.StaffLines.indexOf(line),
             fingering: fingering.value,
-            placement: PlacementEnum[placement] ?? placement,
+            placement: this.getFingeringPlacementDebugName(placement),
             stackIndex,
             labelInitial: this.toFingeringDebugRect(initialLabelRect, line),
             labelPlaced: this.toFingeringDebugRect(placedLabelRect, line),
@@ -3829,33 +4102,16 @@ export abstract class MusicSheetCalculator {
                 this.toFingeringDebugRect(rect, line, index, initialLabelRect, placedLabelRect))
         };
         debugState.placements.push(record);
-
-        const isScoreDebugPage: boolean = `${scope.location?.pathname ?? ""}${scope.location?.search ?? ""}`.includes("score-debug");
-        if (isScoreDebugPage && (measureNumber === 7 || measureNumber === 8)) {
-            const labelShift: number = placedLabelRect.top - initialLabelRect.top;
-            const overlaps: FingeringDebugRect[] = record.collisionRects.filter(
-                (rect: FingeringDebugRect) => rect.overlapsInitialLabel || rect.overlapsPlacedLabel);
-            // Temporary diagnostic for Goldberg Variation 8 fingering/beam collisions.
-            console.log("[fingering-debug]", {
-                measure: measureNumber,
-                staffId: record.staffId,
-                fingering: record.fingering,
-                placement: record.placement,
-                stackIndex,
-                labelShift: Number(labelShift.toFixed(3)),
-                rectCount: collisionRects.length,
-                overlaps: overlaps.map((rect: FingeringDebugRect) => ({
-                    index: rect.index,
-                    kind: rect.kind,
-                    initial: rect.overlapsInitialLabel,
-                    placed: rect.overlapsPlacedLabel,
-                    left: Number(rect.left.toFixed(3)),
-                    right: Number(rect.right.toFixed(3)),
-                    top: Number(rect.top.toFixed(3)),
-                    bottom: Number(rect.bottom.toFixed(3))
-                }))
-            });
-        }
+        this.recordInternalCollisionDebugBoxes(
+            fingering,
+            measure,
+            line,
+            placement,
+            stackIndex,
+            collisionRects,
+            initialLabelRect,
+            placedLabelRect
+        );
     }
 
     private placeFingeringLabel(label: GraphicalLabel, fingering: TechnicalInstruction, gse: GraphicalStaffEntry,
