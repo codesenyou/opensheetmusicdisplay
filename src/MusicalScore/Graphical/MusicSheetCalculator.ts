@@ -40,7 +40,6 @@ import { AbstractNotationInstruction } from "../VoiceData/Instructions/AbstractN
 import { TechnicalInstruction, TechnicalInstructionType } from "../VoiceData/Instructions/TechnicalInstruction";
 import { Pitch } from "../../Common/DataObjects/Pitch";
 import { LinkedVoice } from "../VoiceData/LinkedVoice";
-import { ColDirEnum } from "./BoundingBox";
 import { IGraphicalSymbolFactory } from "../Interfaces/IGraphicalSymbolFactory";
 import { ITextMeasurer } from "../Interfaces/ITextMeasurer";
 import { ITransposeCalculator } from "../Interfaces/ITransposeCalculator";
@@ -141,7 +140,7 @@ interface FingeringDebugRect extends FingeringCollisionRect {
 
 type InternalCollisionDebugKind =
     "beam" | "stem" | "note" | "notehead" | "barline" | "existing-fingering" |
-    "label-initial" | "label-placed" | "tie" | "ornament" | "articulation" | "ornament-reserve";
+    "label-initial" | "label-placed" | "tie" | "ornament" | "articulation" | "ornament-reserve" | "rest";
 
 interface InternalCollisionDebugBox {
     key: string;
@@ -603,9 +602,11 @@ export abstract class MusicSheetCalculator {
                                                   labelOffsetX: number = 0): void {
         const labelNumber: string = measure.parentSourceMeasure.getPrintedMeasureNumber().toString();
         const label: Label = new Label(labelNumber);
+        label.fontFamily = this.rules.MeasureNumberFontFamily;
         // maybe give rules as argument instead of just setting fontStyle and maybe other settings manually afterwards
         const graphicalLabel: GraphicalLabel = new GraphicalLabel(label, this.rules.MeasureNumberLabelHeight,
                                                                   TextAlignmentEnum.LeftBottom, this.rules);
+        graphicalLabel.ParentMeasure = measure;
 
         const skyBottomLineCalculator: SkyBottomLineCalculator = staffLine.SkyBottomLineCalculator;
 
@@ -2444,34 +2445,28 @@ export abstract class MusicSheetCalculator {
         if (graphicalStaffEntry.graphicalVoiceEntries.length === 0) {
             return;
         }
-        const voice1Notes: GraphicalNote[] = graphicalStaffEntry.graphicalVoiceEntries[0].notes;
-        if (voice1Notes.length === 0) {
+        const restNotes: GraphicalNote[] = [];
+        const pitchedNotes: GraphicalNote[] = [];
+        this.collectRestPlacementNotes(graphicalStaffEntry, restNotes, pitchedNotes);
+        if (restNotes.length === 0) {
             return;
         }
-        const voice1Note1: GraphicalNote = voice1Notes[0];
-        const voice1Note1IsRest: boolean = voice1Note1.sourceNote.isRest();
-        if (graphicalStaffEntry.graphicalVoiceEntries.length === 2) {
-            let voice2Note1IsRest: boolean = false;
-            const voice2Notes: GraphicalNote[] = graphicalStaffEntry.graphicalVoiceEntries[1].notes;
-            if (voice2Notes.length > 0) {
-                const voice2Note1: GraphicalNote = voice2Notes[0];
-                voice2Note1IsRest = voice2Note1.sourceNote.isRest();
-            }
-            if (voice1Note1IsRest && voice2Note1IsRest) {
-                this.calculateTwoRestNotesPlacementWithCollisionDetection(graphicalStaffEntry);
-            } else if (voice1Note1IsRest || voice2Note1IsRest) {
-                this.calculateRestNotePlacementWithCollisionDetectionFromGraphicalNote(graphicalStaffEntry);
-            }
-        } else if (voice1Note1IsRest && graphicalStaffEntry !== measure.staffEntries[0] &&
+        if (pitchedNotes.length > 0 || restNotes.length > 1) {
+            this.calculateRestNotesPlacementWithCollisionDetection(graphicalStaffEntry, measure, restNotes, pitchedNotes);
+            return;
+        }
+        const voice1Note1: GraphicalNote = restNotes[0];
+        if (voice1Note1 && graphicalStaffEntry !== measure.staffEntries[0] &&
             graphicalStaffEntry !== measure.staffEntries[measure.staffEntries.length - 1]) {
             const staffEntryIndex: number = measure.staffEntries.indexOf(graphicalStaffEntry);
             const previousStaffEntry: GraphicalStaffEntry = measure.staffEntries[staffEntryIndex - 1];
             const nextStaffEntry: GraphicalStaffEntry = measure.staffEntries[staffEntryIndex + 1];
             if (previousStaffEntry.graphicalVoiceEntries.length === 1) {
                 const previousNote: GraphicalNote = previousStaffEntry.graphicalVoiceEntries[0].notes[0];
-                if (previousNote.sourceNote.NoteBeam !== undefined && nextStaffEntry.graphicalVoiceEntries.length === 1) {
+                if (previousNote?.sourceNote?.NoteBeam !== undefined && nextStaffEntry.graphicalVoiceEntries.length === 1) {
                     const nextNote: GraphicalNote = nextStaffEntry.graphicalVoiceEntries[0].notes[0];
-                    if (nextNote.sourceNote.NoteBeam !== undefined && previousNote.sourceNote.NoteBeam === nextNote.sourceNote.NoteBeam) {
+                    if (nextNote?.sourceNote?.NoteBeam !== undefined &&
+                        previousNote.sourceNote.NoteBeam === nextNote.sourceNote.NoteBeam) {
                         this.calculateRestNotePlacementWithinGraphicalBeam(
                             graphicalStaffEntry, voice1Note1, previousNote,
                             nextStaffEntry, nextNote
@@ -3594,26 +3589,45 @@ export abstract class MusicSheetCalculator {
         this.addFingeringStemCollisionRect(rects, graphicalNote, measure, line);
     }
 
+    private addFingeringRestCollisionRects(rects: FingeringCollisionRect[], restNote: GraphicalNote,
+                                           line: StaffLine, measure: GraphicalMeasure): void {
+        const restRects: FingeringCollisionRect[] = this.getRestCollisionRects(restNote, measure, line);
+        const restId: string = (restNote as any)?.getSVGId?.();
+        for (let restRectIndex: number = 0; restRectIndex < restRects.length; restRectIndex++) {
+            this.addRectIfValid(rects, this.withFingeringDebugSource(
+                restRects[restRectIndex],
+                measure,
+                line,
+                restId ? `rest:${restId}:${restRectIndex}` : `rest:${restRectIndex}`
+            ));
+        }
+    }
+
     private addFingeringNoteheadCollisionRect(rects: FingeringCollisionRect[], graphicalNote: GraphicalNote,
                                               measure: GraphicalMeasure, line: StaffLine): void {
+        this.addRectIfValid(rects, this.getFingeringNoteheadCollisionRect(graphicalNote, measure, line));
+    }
+
+    private getFingeringNoteheadCollisionRect(graphicalNote: GraphicalNote, measure: GraphicalMeasure,
+                                              line: StaffLine): FingeringCollisionRect {
         if (!graphicalNote || graphicalNote.sourceNote?.isRest() ||
             graphicalNote.sourceNote?.Notehead?.Shape === NoteHeadShape.NONE) {
-                return;
+                return undefined;
         }
         const vfNote: any = (graphicalNote as any).vfnote?.[0];
         const noteheadIndex: number = Number((graphicalNote as any).vfnote?.[1] ?? (graphicalNote as any).vfnoteIndex ?? 0);
         if (!vfNote || !Number.isFinite(noteheadIndex) || typeof vfNote.getYs !== "function") {
-            return;
+            return undefined;
         }
         const ys: number[] = vfNote.getYs();
         if (!Array.isArray(ys) || !Number.isFinite(ys[noteheadIndex])) {
-            return;
+            return undefined;
         }
         const xs: number[] = typeof vfNote.getXs === "function" ? vfNote.getXs() : [];
         const fallbackX: number = typeof vfNote.getStemX === "function" ? vfNote.getStemX() : undefined;
         const x: number = Number.isFinite(xs[noteheadIndex]) ? xs[noteheadIndex] : xs.length > 0 ? xs[xs.length - 1] : fallbackX;
         if (!Number.isFinite(x)) {
-            return;
+            return undefined;
         }
         const radius: number = this.estimateFingeringNoteheadRadiusPx(vfNote);
         const staveOrigin: { x: number, y: number } = this.getVexFlowStaveOriginPx(vfNote);
@@ -3625,15 +3639,15 @@ export abstract class MusicSheetCalculator {
             height: radius * 2
         }, measureX, staveOrigin, "notehead", 1);
         if (!rect || rect.bottom < -4 || rect.top > this.rules.StaffHeight + 4) {
-            return;
+            return undefined;
         }
         const noteId: string = (graphicalNote as any)?.getSVGId?.();
-        this.addRectIfValid(rects, this.withFingeringDebugSource(
+        return this.withFingeringDebugSource(
             rect,
             measure,
             line,
             noteId ? `notehead:${noteId}:${noteheadIndex}` : `notehead:${noteheadIndex}`
-        ));
+        );
     }
 
     private estimateFingeringNoteheadRadiusPx(vfNote: any): number {
@@ -4379,7 +4393,11 @@ export abstract class MusicSheetCalculator {
             for (const staffEntry of nearbyMeasure.staffEntries) {
                 for (const voiceEntry of staffEntry.graphicalVoiceEntries) {
                     for (const note of voiceEntry.notes) {
-                        this.addFingeringNoteCollisionRects(rects, note, line, nearbyMeasure);
+                        if (note.sourceNote?.isRest()) {
+                            this.addFingeringRestCollisionRects(rects, note, line, nearbyMeasure);
+                        } else {
+                            this.addFingeringNoteCollisionRects(rects, note, line, nearbyMeasure);
+                        }
                     }
                 }
                 for (let fingeringIndex: number = 0; fingeringIndex < staffEntry.FingeringEntries.length; fingeringIndex++) {
@@ -4487,6 +4505,8 @@ export abstract class MusicSheetCalculator {
                 return 70;
             case "notehead":
                 return 40;
+            case "rest":
+                return 30;
             case "stem":
                 return stacked ? 5 : 28;
             case "note":
@@ -4689,6 +4709,7 @@ export abstract class MusicSheetCalculator {
             case "ornament":
             case "articulation":
             case "ornament-reserve":
+            case "rest":
                 return kind as InternalCollisionDebugKind;
             default:
                 return undefined;
@@ -5104,11 +5125,10 @@ export abstract class MusicSheetCalculator {
                             const alignment: TextAlignmentEnum =
                                 placement === PlacementEnum.Above ? TextAlignmentEnum.CenterBottom : TextAlignmentEnum.CenterTop;
                             const label: Label = new Label(fingering.value, alignment);
+                            label.fontFamily = fingering.fontFamily || this.rules.FingeringFontFamily;
+                            label.fontStyle = FontStyles.Regular;
                             const gLabel: GraphicalLabel = new GraphicalLabel(
                                 label, this.rules.FingeringTextSize, label.textAlignment, this.rules, line.PositionAndShape);
-                            if (fingering.fontFamily) {
-                                label.fontFamily = fingering.fontFamily;
-                            }
                             const workItem: FingeringPlacementWorkItem =
                                 this.createFingeringPlacementWorkItem(gLabel, fingering, gse, measure, line, placementItem.slot);
                             let placementGroup: { placement: PlacementEnum, items: FingeringPlacementWorkItem[] } =
@@ -5150,61 +5170,476 @@ export abstract class MusicSheetCalculator {
         }
     }
 
-    private calculateTwoRestNotesPlacementWithCollisionDetection(graphicalStaffEntry: GraphicalStaffEntry): void {
-        const firstRestNote: GraphicalNote = graphicalStaffEntry.graphicalVoiceEntries[0].notes[0];
-        const secondRestNote: GraphicalNote = graphicalStaffEntry.graphicalVoiceEntries[1].notes[0];
-        secondRestNote.PositionAndShape.RelativePosition = new PointF2D(0.0, 2.5);
-        graphicalStaffEntry.PositionAndShape.calculateAbsolutePositionsRecursiveWithoutTopelement();
-        firstRestNote.PositionAndShape.computeNonOverlappingPositionWithMargin(
-            graphicalStaffEntry.PositionAndShape, ColDirEnum.Up,
-            new PointF2D(0.0, secondRestNote.PositionAndShape.RelativePosition.y)
-        );
-        const relative: PointF2D = firstRestNote.PositionAndShape.RelativePosition;
-        relative.y -= 1.0;
-        firstRestNote.PositionAndShape.RelativePosition = relative;
-        graphicalStaffEntry.PositionAndShape.calculateBoundingBox();
-    }
-
-    private calculateRestNotePlacementWithCollisionDetectionFromGraphicalNote(graphicalStaffEntry: GraphicalStaffEntry): void {
-        let restNote: GraphicalNote;
-        let graphicalNotes: GraphicalNote[];
-        if (graphicalStaffEntry.graphicalVoiceEntries[0].notes[0].sourceNote.isRest()) {
-            restNote = graphicalStaffEntry.graphicalVoiceEntries[0].notes[0];
-            graphicalNotes = graphicalStaffEntry.graphicalVoiceEntries[1].notes;
-        } else {
-            graphicalNotes = graphicalStaffEntry.graphicalVoiceEntries[0].notes;
-            restNote = graphicalStaffEntry.graphicalVoiceEntries[1].notes[0];
-        }
-        //restNote.parallelVoiceEntryNotes = graphicalNotes; // TODO maybe save potentially colliding notes, check them in VexFlowConverter.StaveNote
-        let collision: boolean = false;
-        graphicalStaffEntry.PositionAndShape.calculateAbsolutePositionsRecursiveWithoutTopelement();
-        for (let idx: number = 0, len: number = graphicalNotes.length; idx < len; ++idx) {
-            const graphicalNote: GraphicalNote = graphicalNotes[idx];
-            if (restNote.PositionAndShape.marginCollisionDetection(graphicalNote.PositionAndShape)) {
-                // TODO bounding box of graphical note isn't set correctly yet.
-                // we could do manual collision checking here
-                collision = true;
-                break;
-            }
-        }
-        if (collision) {
-            if (restNote.sourceNote.ParentVoiceEntry.ParentVoice instanceof LinkedVoice) {
-                const bottomBorder: number = graphicalNotes[0].PositionAndShape.BorderMarginBottom + graphicalNotes[0].PositionAndShape.RelativePosition.y;
-                restNote.PositionAndShape.RelativePosition = new PointF2D(0.0, bottomBorder - restNote.PositionAndShape.BorderMarginTop + 0.5);
-            } else {
-                const last: GraphicalNote = graphicalNotes[graphicalNotes.length - 1];
-                const topBorder: number = last.PositionAndShape.BorderMarginTop + last.PositionAndShape.RelativePosition.y;
-                if (graphicalNotes[0].sourceNote.ParentVoiceEntry.ParentVoice instanceof LinkedVoice) {
-                    restNote.PositionAndShape.RelativePosition = new PointF2D(0.0, topBorder - restNote.PositionAndShape.BorderMarginBottom - 0.5);
-                } else {
-                    const bottomBorder: number = graphicalNotes[0].PositionAndShape.BorderMarginBottom + graphicalNotes[0].PositionAndShape.RelativePosition.y;
-                    if (bottomBorder < 2.0) {
-                        restNote.PositionAndShape.RelativePosition = new PointF2D(0.0, bottomBorder - restNote.PositionAndShape.BorderMarginTop + 0.5);
-                    } else {
-                        restNote.PositionAndShape.RelativePosition = new PointF2D(0.0, topBorder - restNote.PositionAndShape.BorderMarginBottom - 0.0);
-                    }
+    private collectRestPlacementNotes(graphicalStaffEntry: GraphicalStaffEntry,
+                                      restNotes: GraphicalNote[],
+                                      pitchedNotes: GraphicalNote[]): void {
+        for (const voiceEntry of graphicalStaffEntry.graphicalVoiceEntries) {
+            for (const graphicalNote of voiceEntry.notes) {
+                if (graphicalNote.sourceNote?.isRest()) {
+                    restNotes.push(graphicalNote);
+                } else if (graphicalNote.sourceNote?.PrintObject !== false) {
+                    pitchedNotes.push(graphicalNote);
                 }
             }
+        }
+    }
+
+    private collectRestPlacementMeasurePitchedNotes(measure: GraphicalMeasure,
+                                                    seedNotes: GraphicalNote[]): GraphicalNote[] {
+        const notes: GraphicalNote[] = seedNotes.slice();
+        for (const staffEntry of measure.staffEntries ?? []) {
+            for (const voiceEntry of staffEntry.graphicalVoiceEntries ?? []) {
+                for (const graphicalNote of voiceEntry.notes ?? []) {
+                    if (graphicalNote.sourceNote?.isRest() || graphicalNote.sourceNote?.PrintObject === false ||
+                        notes.indexOf(graphicalNote) >= 0) {
+                            continue;
+                    }
+                    notes.push(graphicalNote);
+                }
+            }
+        }
+        return notes;
+    }
+
+    private getRestVexFlowNote(restNote: GraphicalNote): any {
+        return (restNote as any).vfnote?.[0];
+    }
+
+    private getRestVexFlowNoteIndex(restNote: GraphicalNote): number {
+        const noteheadIndex: number = Number((restNote as any).vfnote?.[1] ?? (restNote as any).vfnoteIndex ?? 0);
+        return Number.isFinite(noteheadIndex) ? noteheadIndex : 0;
+    }
+
+    private getVexFlowElementBoundingRectPx(element: any, padding: number = 0): FingeringPxRect {
+        let box: any;
+        try {
+            box = typeof element?.getBoundingBox === "function" ? element.getBoundingBox() : element?.boundingBox;
+        } catch (e) {
+            return undefined;
+        }
+        if (!box) {
+            return undefined;
+        }
+        const x: number = Number(typeof box.getX === "function" ? box.getX() : box.x);
+        const y: number = Number(typeof box.getY === "function" ? box.getY() : box.y);
+        const width: number = Number(typeof box.getW === "function" ? box.getW() : box.w ?? box.width);
+        const height: number = Number(typeof box.getH === "function" ? box.getH() : box.h ?? box.height);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height) ||
+            Math.abs(width) <= 0.01 || Math.abs(height) <= 0.01) {
+                return undefined;
+        }
+        return this.normalizeFingeringPxRect({ x, y, width, height }, padding);
+    }
+
+    private getRestGlyphFallbackRectPx(restNote: GraphicalNote, vfNote: any): FingeringPxRect {
+        if (!vfNote) {
+            return undefined;
+        }
+        const index: number = this.getRestVexFlowNoteIndex(restNote);
+        const stave: any = typeof vfNote.getStave === "function" ? vfNote.getStave() : vfNote.stave;
+        const glyphMetrics: { width: number, height: number } =
+            this.getFingeringVexFlowGlyphMetrics(vfNote.glyph, vfNote);
+        const glyphWidth: number = Number(typeof vfNote.getGlyphWidth === "function" ? vfNote.getGlyphWidth() : glyphMetrics.width);
+        const staffSpace: number = Number(stave?.getSpacingBetweenLines?.() ?? 10);
+        const width: number = Math.min(Math.max(
+            Number.isFinite(glyphWidth) ? glyphWidth : 0,
+            glyphMetrics.width,
+            staffSpace * 0.85,
+            10
+        ), staffSpace * 1.6);
+        const height: number = Math.min(Math.max(
+            glyphMetrics.height,
+            staffSpace * 1.6,
+            14
+        ), staffSpace * 2.3);
+
+        const xs: number[] = typeof vfNote.getXs === "function" ? vfNote.getXs() : [];
+        const absoluteX: number = Number(typeof vfNote.getAbsoluteX === "function" ? vfNote.getAbsoluteX() : vfNote.getX?.());
+        const keyProps: any[] = typeof vfNote.getKeyProps === "function" ? vfNote.getKeyProps() : vfNote.keyProps;
+        const keyLine: number = Number(keyProps?.[index]?.line ?? keyProps?.[0]?.line);
+        const fallbackY: number = Number.isFinite(keyLine) && typeof stave?.getYForNote === "function" ?
+            Number(stave.getYForNote(keyLine)) : undefined;
+
+        const centerX: number = Number.isFinite(xs?.[index]) ? xs[index] :
+            Number.isFinite(absoluteX) ? absoluteX + width / 2 : undefined;
+        const centerY: number = fallbackY;
+        if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+            return undefined;
+        }
+        return this.normalizeFingeringPxRect({
+            x: centerX - width / 2,
+            y: centerY - height / 2,
+            width,
+            height
+        }, 0.4);
+    }
+
+    private getRestGlyphCollisionRect(restNote: GraphicalNote, measure: GraphicalMeasure): FingeringCollisionRect {
+        const vfNote: any = this.getRestVexFlowNote(restNote);
+        if (!vfNote) {
+            return undefined;
+        }
+        const measureX: number = measure?.PositionAndShape?.RelativePosition?.x ?? 0;
+        const staveOrigin: { x: number, y: number } = this.getVexFlowStaveOriginPx(vfNote);
+        const pxRect: FingeringPxRect = this.getRestGlyphFallbackRectPx(restNote, vfNote) ??
+            this.getVexFlowElementBoundingRectPx(vfNote, 1.0);
+        const rect: FingeringCollisionRect =
+            this.fingeringPxRectToCollisionRect(pxRect, measureX, staveOrigin, "rest", 1);
+        if (!rect || rect.bottom < -4 || rect.top > this.rules.StaffHeight + 4) {
+            return undefined;
+        }
+        return rect;
+    }
+
+    private getRestCollisionRects(restNote: GraphicalNote, measure: GraphicalMeasure,
+                                  line: StaffLine): FingeringCollisionRect[] {
+        const rects: FingeringCollisionRect[] = [];
+        this.addRectIfValid(rects, this.getRestGlyphCollisionRect(restNote, measure));
+        if (rects.length === 0 && line) {
+            const restRect: FingeringCollisionRect =
+                this.getBoundingBoxRectInStaffLine(restNote.PositionAndShape, line, true);
+            if (restRect) {
+                restRect.kind = "rest";
+            }
+            this.addRectIfValid(rects, restRect);
+        }
+        return rects;
+    }
+
+    private getRestCollisionNoteRects(graphicalNotes: GraphicalNote[], measure: GraphicalMeasure,
+                                      line: StaffLine): FingeringCollisionRect[] {
+        const rects: FingeringCollisionRect[] = [];
+        if (!line) {
+            return rects;
+        }
+        for (const graphicalNote of graphicalNotes) {
+            if (graphicalNote.sourceNote?.isRest()) {
+                continue;
+            }
+            this.addFingeringNoteheadCollisionRect(rects, graphicalNote, measure, line);
+            this.addFingeringStemCollisionRect(rects, graphicalNote, measure, line);
+        }
+        return rects;
+    }
+
+    private getRestCollisionCost(restRects: FingeringCollisionRect[], noteRects: FingeringCollisionRect[]): number {
+        let cost: number = 0;
+        for (const restRect of restRects) {
+            for (const noteRect of noteRects) {
+                const restPadding: number = noteRect.kind === "stem" ? 0.015 : noteRect.kind === "rest" ? 0.16 : 0.1;
+                const obstaclePadding: number = noteRect.kind === "stem" ? 0.005 : noteRect.kind === "rest" ? 0.16 : 0.06;
+                const expandedRestRect: FingeringCollisionRect = this.expandFingeringRect(restRect, restPadding);
+                const expandedNoteRect: FingeringCollisionRect = this.expandFingeringRect(noteRect, obstaclePadding);
+                const overlap: number = this.getRectOverlapArea(expandedRestRect, expandedNoteRect);
+                if (overlap <= 0) {
+                    continue;
+                }
+                const kindWeight: number =
+                    noteRect.kind === "notehead" ? 8 :
+                    noteRect.kind === "rest" ? 9 :
+                    noteRect.kind === "stem" ? 0.02 :
+                    noteRect.kind === "note" ? 0.6 : 0.3;
+                cost += overlap * kindWeight;
+            }
+        }
+        return cost;
+    }
+
+    private getRestHardCollisionCost(restRects: FingeringCollisionRect[], noteRects: FingeringCollisionRect[]): number {
+        let cost: number = 0;
+        for (const restRect of restRects) {
+            for (const noteRect of noteRects) {
+                if (noteRect.kind !== "notehead" && noteRect.kind !== "rest") {
+                    continue;
+                }
+                const overlap: number = this.getRectOverlapArea(
+                    this.expandFingeringRect(restRect, 0.035),
+                    this.expandFingeringRect(noteRect, noteRect.kind === "rest" ? 0.08 : 0.04)
+                );
+                if (overlap <= 0) {
+                    continue;
+                }
+                cost += overlap * (noteRect.kind === "rest" ? 2 : 1);
+            }
+        }
+        return cost;
+    }
+
+    private restNoteCollidesWithGraphicalNotes(restNote: GraphicalNote, graphicalNotes: GraphicalNote[],
+                                               measure: GraphicalMeasure, line: StaffLine): boolean {
+        const noteRects: FingeringCollisionRect[] = this.getRestCollisionNoteRects(graphicalNotes, measure, line);
+        const restRects: FingeringCollisionRect[] = this.getRestCollisionRects(restNote, measure, line);
+        if (this.getRestCollisionCost(restRects, noteRects) > 0) {
+            return true;
+        }
+        for (const graphicalNote of graphicalNotes) {
+            if (restNote.PositionAndShape.marginCollisionDetection(graphicalNote.PositionAndShape)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private getRestVoiceStemDirection(voiceEntry: VoiceEntry): number {
+        switch (voiceEntry?.StemDirection) {
+            case StemDirectionType.Up:
+                return this.getFingeringVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getFingeringVexFlowStemDown();
+            default:
+                break;
+        }
+        switch (voiceEntry?.WantedStemDirection) {
+            case StemDirectionType.Up:
+                return this.getFingeringVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getFingeringVexFlowStemDown();
+            default:
+                break;
+        }
+        return undefined;
+    }
+
+    private getRestPitchedNoteStemDirection(graphicalNote: GraphicalNote): number {
+        if (!graphicalNote || graphicalNote.sourceNote?.isRest()) {
+            return undefined;
+        }
+        const vfNote: any = (graphicalNote as any).vfnote?.[0];
+        const hasStem: boolean = typeof vfNote?.hasStem === "function" ? vfNote.hasStem() : !!vfNote?.getStem?.();
+        if (hasStem || typeof vfNote?.hasStem !== "function") {
+            const actualDirection: number = Number(
+                typeof vfNote?.getStemDirection === "function" ? vfNote.getStemDirection() : vfNote?.stem_direction
+            );
+            if (Number.isFinite(actualDirection) && actualDirection !== 0) {
+                return actualDirection;
+            }
+        }
+        return this.getRestVoiceStemDirection(
+            graphicalNote.sourceNote?.ParentVoiceEntry ?? graphicalNote.parentVoiceEntry?.parentVoiceEntry
+        );
+    }
+
+    private getRestTargetGraphicalNote(restRect: FingeringCollisionRect, graphicalNotes: GraphicalNote[],
+                                       measure: GraphicalMeasure, line: StaffLine): GraphicalNote {
+        if (graphicalNotes.length === 0) {
+            return undefined;
+        }
+        if (!restRect || !line) {
+            return graphicalNotes[0];
+        }
+        const restCenterX: number = (restRect.left + restRect.right) / 2;
+        const restCenterY: number = (restRect.top + restRect.bottom) / 2;
+        const candidates: { note: GraphicalNote, rect: FingeringCollisionRect }[] = [];
+        for (const graphicalNote of graphicalNotes) {
+            const noteheadRect: FingeringCollisionRect =
+                this.getFingeringNoteheadCollisionRect(graphicalNote, measure, line);
+            if (noteheadRect) {
+                candidates.push({ note: graphicalNote, rect: noteheadRect });
+            }
+        }
+        if (candidates.length === 0) {
+            return graphicalNotes[0];
+        }
+        return candidates.sort((a: { note: GraphicalNote, rect: FingeringCollisionRect },
+                                b: { note: GraphicalNote, rect: FingeringCollisionRect }) => {
+            const overlapA: number = Math.max(0, Math.min(restRect.right, a.rect.right) - Math.max(restRect.left, a.rect.left));
+            const overlapB: number = Math.max(0, Math.min(restRect.right, b.rect.right) - Math.max(restRect.left, b.rect.left));
+            const distanceXA: number = Math.abs(restCenterX - (a.rect.left + a.rect.right) / 2);
+            const distanceXB: number = Math.abs(restCenterX - (b.rect.left + b.rect.right) / 2);
+            const distanceYA: number = Math.abs(restCenterY - (a.rect.top + a.rect.bottom) / 2);
+            const distanceYB: number = Math.abs(restCenterY - (b.rect.top + b.rect.bottom) / 2);
+            return overlapB - overlapA || distanceXA - distanceXB || distanceYA - distanceYB;
+        })[0].note;
+    }
+
+    private shouldPlaceRestAboveCollidingNote(restNote: GraphicalNote, targetNote: GraphicalNote,
+                                              graphicalNotes: GraphicalNote[]): boolean {
+        let collidingStemDirection: number = this.getRestPitchedNoteStemDirection(targetNote);
+        if (!Number.isFinite(collidingStemDirection)) {
+            collidingStemDirection = graphicalNotes
+                .map((note: GraphicalNote) => this.getRestPitchedNoteStemDirection(note))
+                .find((direction: number) => Number.isFinite(direction));
+        }
+        if (collidingStemDirection > 0) {
+            return false;
+        }
+        if (collidingStemDirection < 0) {
+            return true;
+        }
+
+        const restStemDirection: number = this.getRestVoiceStemDirection(restNote.sourceNote?.ParentVoiceEntry);
+        if (restStemDirection > 0) {
+            return true;
+        }
+        if (restStemDirection < 0) {
+            return false;
+        }
+        const voiceId: number = restNote.sourceNote?.ParentVoiceEntry?.ParentVoice?.VoiceId ?? 0;
+        if (voiceId > 0) {
+            return voiceId % 2 === 1;
+        }
+        return true;
+    }
+
+    private clampRestCollisionLineShift(lineShift: number): number {
+        if (!Number.isFinite(lineShift)) {
+            return 0;
+        }
+        return Math.max(-3.5, Math.min(3.5, lineShift));
+    }
+
+    private clampRestCollisionKeyLine(line: number): number {
+        return Math.max(-1.5, Math.min(5.5, line));
+    }
+
+    private getRestNoteLineShift(restNote: GraphicalNote): number {
+        return this.clampRestCollisionLineShift(Number(restNote.lineShift ?? 0));
+    }
+
+    private setRestNoteLineShift(restNote: GraphicalNote, lineShift: number): void {
+        const nextLineShift: number = this.clampRestCollisionLineShift(lineShift);
+        const previousLineShift: number = this.getRestNoteLineShift(restNote);
+        const delta: number = nextLineShift - previousLineShift;
+        restNote.lineShift = nextLineShift;
+        if (Math.abs(delta) <= 0.0001) {
+            return;
+        }
+        const vfNote: any = this.getRestVexFlowNote(restNote);
+        const keyProps: any[] = typeof vfNote?.getKeyProps === "function" ? vfNote.getKeyProps() : vfNote?.keyProps;
+        const noteheadIndex: number = this.getRestVexFlowNoteIndex(restNote);
+        const keyProp: any = keyProps?.[noteheadIndex] ?? keyProps?.[0];
+        if (!keyProp || !Number.isFinite(Number(keyProp.line))) {
+            return;
+        }
+        const nextLine: number = this.clampRestCollisionKeyLine(Number(keyProp.line) + delta);
+        if (typeof vfNote.setKeyLine === "function") {
+            vfNote.setKeyLine(noteheadIndex, nextLine);
+        } else {
+            keyProp.line = nextLine;
+        }
+    }
+
+    private setRestCollisionCandidateState(restNote: GraphicalNote, basePosition: PointF2D,
+                                           baseLineShift: number, candidateLineShift: number): void {
+        const boundedLineShift: number = this.clampRestCollisionLineShift(candidateLineShift);
+        this.setRestNoteLineShift(restNote, boundedLineShift);
+        const lineDelta: number = boundedLineShift - baseLineShift;
+        restNote.PositionAndShape.RelativePosition = new PointF2D(basePosition.x, basePosition.y - lineDelta);
+    }
+
+    private getRestLineShiftCandidates(baseLineShift: number): number[] {
+        const candidates: number[] = [baseLineShift];
+        for (let lineShift: number = -3.5; lineShift <= 3.5001; lineShift += 0.5) {
+            candidates.push(lineShift);
+        }
+        const uniqueCandidates: number[] = Array.from(new Set(candidates.map((candidate: number) =>
+            this.clampRestCollisionLineShift(candidate))));
+        return uniqueCandidates.sort((a: number, b: number) =>
+            Math.abs(a - baseLineShift) - Math.abs(b - baseLineShift) || a - b);
+    }
+
+    private getAdjacentRestPlacementScore(restRects: FingeringCollisionRect[], noteRects: FingeringCollisionRect[],
+                                          targetNoteheadRect: FingeringCollisionRect, placeAbove: boolean,
+                                          candidateLineShift: number, baseLineShift: number): number {
+        const restRect: FingeringCollisionRect = restRects[0];
+        if (!restRect) {
+            return Number.POSITIVE_INFINITY;
+        }
+        const collisionCost: number = this.getRestCollisionCost(restRects, noteRects);
+        const hardCollisionCost: number = this.getRestHardCollisionCost(restRects, noteRects);
+        const lineDelta: number = candidateLineShift - baseLineShift;
+        const preferredDirection: number = placeAbove ? 1 : -1;
+        const wrongDirectionCost: number = Math.abs(lineDelta) > 0.0001 && Math.sign(lineDelta) !== preferredDirection ? 140 : 0;
+        const movementCost: number = Math.pow(Math.abs(lineDelta), 1.28) * 48 + wrongDirectionCost;
+        let adjacencyCost: number = 0;
+        if (targetNoteheadRect) {
+            const clearance: number = 0.1;
+            const desiredEdge: number = placeAbove ? targetNoteheadRect.top - clearance : targetNoteheadRect.bottom + clearance;
+            const actualEdge: number = placeAbove ? restRect.bottom : restRect.top;
+            const wrongSideDistance: number = placeAbove ?
+                Math.max(0, actualEdge - desiredEdge) :
+                Math.max(0, desiredEdge - actualEdge);
+            const edgeDistance: number = Math.abs(actualEdge - desiredEdge);
+            const restCenterX: number = (restRect.left + restRect.right) / 2;
+            const noteCenterX: number = (targetNoteheadRect.left + targetNoteheadRect.right) / 2;
+            const xDistance: number = Math.abs(restCenterX - noteCenterX);
+            adjacencyCost =
+                wrongSideDistance * 5000 +
+                edgeDistance * 80 +
+                xDistance * 0.3;
+        }
+        return hardCollisionCost * 1000000 +
+            collisionCost * 16000 +
+            adjacencyCost +
+            movementCost;
+    }
+
+    private resolveRestLineShiftCollision(restNote: GraphicalNote, targetGraphicalNotes: GraphicalNote[],
+                                          collisionGraphicalNotes: GraphicalNote[],
+                                          restBlockerRects: FingeringCollisionRect[],
+                                          graphicalStaffEntry: GraphicalStaffEntry,
+                                          measure: GraphicalMeasure, line: StaffLine): void {
+        const noteRects: FingeringCollisionRect[] =
+            this.getRestCollisionNoteRects(collisionGraphicalNotes, measure, line).concat(restBlockerRects);
+        if (noteRects.length === 0) {
+            return;
+        }
+        const initialRestRects: FingeringCollisionRect[] = this.getRestCollisionRects(restNote, measure, line);
+        const targetNote: GraphicalNote = this.getRestTargetGraphicalNote(initialRestRects[0], targetGraphicalNotes, measure, line) ??
+            this.getRestTargetGraphicalNote(initialRestRects[0], collisionGraphicalNotes, measure, line);
+        const targetNoteheadRect: FingeringCollisionRect = targetNote ?
+            this.getFingeringNoteheadCollisionRect(targetNote, measure, line) : undefined;
+        const placeAbove: boolean = this.shouldPlaceRestAboveCollidingNote(restNote, targetNote, collisionGraphicalNotes);
+        const basePosition: PointF2D = restNote.PositionAndShape.RelativePosition;
+        const baseLineShift: number = this.getRestNoteLineShift(restNote);
+        let bestLineShift: number = baseLineShift;
+        let bestScore: number = Number.POSITIVE_INFINITY;
+
+        for (const candidateLineShift of this.getRestLineShiftCandidates(baseLineShift)) {
+            this.setRestCollisionCandidateState(restNote, basePosition, baseLineShift, candidateLineShift);
+            graphicalStaffEntry.PositionAndShape.calculateAbsolutePositionsRecursiveWithoutTopelement();
+            const restRects: FingeringCollisionRect[] = this.getRestCollisionRects(restNote, measure, line);
+            const score: number = this.getAdjacentRestPlacementScore(
+                restRects, noteRects, targetNoteheadRect, placeAbove, candidateLineShift, baseLineShift);
+            if (score < bestScore - 0.0001 ||
+                (Math.abs(score - bestScore) <= 0.0001 &&
+                    Math.abs(candidateLineShift - baseLineShift) < Math.abs(bestLineShift - baseLineShift))) {
+                    bestScore = score;
+                    bestLineShift = candidateLineShift;
+            }
+        }
+
+        this.setRestCollisionCandidateState(restNote, basePosition, baseLineShift, bestLineShift);
+        graphicalStaffEntry.PositionAndShape.calculateAbsolutePositionsRecursiveWithoutTopelement();
+    }
+
+    private calculateRestNotesPlacementWithCollisionDetection(graphicalStaffEntry: GraphicalStaffEntry,
+                                                              measure: GraphicalMeasure,
+                                                              restNotes: GraphicalNote[],
+                                                              graphicalNotes: GraphicalNote[]): void {
+        const line: StaffLine = measure.ParentStaffLine;
+        graphicalStaffEntry.PositionAndShape.calculateAbsolutePositionsRecursiveWithoutTopelement();
+        const collisionGraphicalNotes: GraphicalNote[] =
+            this.collectRestPlacementMeasurePitchedNotes(measure, graphicalNotes);
+        const placedRestRects: FingeringCollisionRect[] = [];
+        for (const restNote of restNotes) {
+            const restRects: FingeringCollisionRect[] = this.getRestCollisionRects(restNote, measure, line);
+            const collidesWithNotes: boolean =
+                this.restNoteCollidesWithGraphicalNotes(restNote, collisionGraphicalNotes, measure, line);
+            const collidesWithPlacedRests: boolean = this.getRestCollisionCost(restRects, placedRestRects) > 0;
+            if (graphicalNotes.length > 0 || collidesWithNotes || collidesWithPlacedRests) {
+                this.resolveRestLineShiftCollision(
+                    restNote,
+                    graphicalNotes,
+                    collisionGraphicalNotes,
+                    placedRestRects,
+                    graphicalStaffEntry,
+                    measure,
+                    line
+                );
+            }
+            const finalRestRects: FingeringCollisionRect[] = this.getRestCollisionRects(restNote, measure, line);
+            placedRestRects.push(...finalRestRects);
         }
         graphicalStaffEntry.PositionAndShape.calculateBoundingBox();
     }

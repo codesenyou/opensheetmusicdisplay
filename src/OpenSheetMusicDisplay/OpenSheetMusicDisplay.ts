@@ -549,6 +549,9 @@ export class OpenSheetMusicDisplay {
         if (options.measureNumberInterval !== undefined) {
             this.rules.MeasureNumberLabelOffset = options.measureNumberInterval;
         }
+        if (options.measureNumberFontFamily !== undefined) {
+            this.rules.MeasureNumberFontFamily = options.measureNumberFontFamily;
+        }
         if (options.useXMLMeasureNumbers !== undefined) {
             this.rules.UseXMLMeasureNumbers = options.useXMLMeasureNumbers;
         }
@@ -557,6 +560,9 @@ export class OpenSheetMusicDisplay {
         }
         if (options.fingeringInsideStafflines !== undefined) {
             this.rules.FingeringInsideStafflines = options.fingeringInsideStafflines;
+        }
+        if (options.fingeringFontFamily !== undefined) {
+            this.rules.FingeringFontFamily = options.fingeringFontFamily;
         }
         if (options.newSystemFromXML !== undefined) {
             this.rules.NewSystemAtXMLNewSystemAttribute = options.newSystemFromXML;

@@ -3,6 +3,7 @@ import { Label } from "../Label";
 import { BoundingBox } from "./BoundingBox";
 import { Clickable } from "./Clickable";
 import { EngravingRules } from "./EngravingRules";
+import { GraphicalMeasure } from "./GraphicalMeasure";
 import { MusicSheetCalculator } from "./MusicSheetCalculator";
 
 /**
@@ -17,6 +18,8 @@ export class GraphicalLabel extends Clickable {
      *  For the Canvas backend, this is unfortunately not possible.
      */
     public SVGNode: Node;
+    /** Measure that owns this label, if the label is rendered as part of a measure. */
+    public ParentMeasure: GraphicalMeasure;
     /** Read-only informational variable only set once by lyrics centering algorithm. */
     public CenteringXShift: number = 0;
     public ColorXML: string;

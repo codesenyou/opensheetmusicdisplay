@@ -512,7 +512,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         let newBuzzRollId: number = 0;
         // Draw the StaffEntries
         for (const staffEntry of measure.staffEntries) {
-            this.drawStaffEntry(staffEntry);
+            this.drawStaffEntry(staffEntry, measure);
             newBuzzRollId = this.drawBuzzRolls(staffEntry, newBuzzRollId);
         }
     }
@@ -725,10 +725,11 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         }
     }
 
-    private drawStaffEntry(staffEntry: GraphicalStaffEntry): void {
+    private drawStaffEntry(staffEntry: GraphicalStaffEntry, measure: VexFlowMeasure): void {
         if (staffEntry.FingeringEntries.length > 0) {
             for (const fingeringEntry of staffEntry.FingeringEntries) {
                 fingeringEntry.SVGNode = this.drawLabel(fingeringEntry, GraphicalLayers.Notes);
+                this.appendNodeToMeasureGroup(fingeringEntry.SVGNode, measure);
             }
         }
         // Draw ChordSymbols
@@ -743,6 +744,18 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
                 this.drawLyrics(staffEntry.LyricsEntries, <number>GraphicalLayers.Notes);
             }
         }
+    }
+
+    protected afterMeasureNumberLabelDrawn(measureNumberLabel: GraphicalLabel, musicSystem: MusicSystem): void {
+        const measure: VexFlowMeasure = measureNumberLabel.ParentMeasure as VexFlowMeasure;
+        this.appendNodeToMeasureGroup(measureNumberLabel.SVGNode, measure);
+    }
+
+    private appendNodeToMeasureGroup(node: Node, measure: VexFlowMeasure): void {
+        if (!node || !measure?.SVGNode || node.parentNode === measure.SVGNode) {
+            return;
+        }
+        measure.SVGNode.appendChild(node);
     }
 
     /**

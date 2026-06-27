@@ -288,7 +288,6 @@ export class VexFlowConverter {
                 if (note.sourceNote.Pitch) {
                     const restVfPitch: [string, string, ClefInstruction] = (note as VexFlowGraphicalNote).vfpitch;
                     keys = [restVfPitch[0]];
-                    break;
                 } else {
                     keys = ["b/4"]; // default placement
 
@@ -343,12 +342,9 @@ export class VexFlowConverter {
                     xShift = rules.WholeRestXShiftVexflow * unitInPixels; // TODO find way to make dependent on the modifiers
                     // affects VexFlowStaffEntry.calculateXPosition()
                 }
-                // If we have more than one visible voice entry, shift rests by bounded staff-line steps.
-                // Never derive rest height from neighboring pitches: extreme cross-staff notes can otherwise
-                // place rests outside the measure or even between systems.
-                if (note.sourceNote.ParentStaff.Voices.length > 1) {
-                    note.lineShift = VexFlowConverter.getBoundedRestLineShift(note, duration, rules);
-                }
+                // Rest lanes are resolved after VexFlow has final y positions and bounding boxes.
+                // Keep conversion neutral so the draw-time pass is the single source of truth.
+                note.lineShift = 0;
                 // vfClefType seems to be undefined for rest notes, but setting it seems to break rest positioning.
                 // if (!vfClefType) {
                 //     const clef = (note as VexFlowGraphicalNote).Clef();
@@ -520,7 +516,15 @@ export class VexFlowConverter {
         }
         const lineShift: number = VexFlowConverter.getSafeLineShift(gve.notes[0]);
         if (lineShift !== 0) {
-            vfnote.getKeyProps()[0].line += lineShift;
+            const keyProps: any[] = vfnote.getKeyProps?.() ?? [];
+            const nextLine: number = Number(keyProps[0]?.line) + lineShift;
+            if (Number.isFinite(nextLine)) {
+                if (typeof (vfnote as any).setKeyLine === "function") {
+                    (vfnote as any).setKeyLine(0, nextLine);
+                } else {
+                    keyProps[0].line = nextLine;
+                }
+            }
         }
         if (isRest) {
             VexFlowConverter.clampRestKeyProps(vfnote);
@@ -643,44 +647,6 @@ export class VexFlowConverter {
         return vfnote;
     }
 
-    private static getBoundedRestLineShift(restNote: GraphicalNote, duration: string, rules: EngravingRules): number {
-        const voiceEntries: GraphicalVoiceEntry[] = restNote.parentVoiceEntry?.parentStaffEntry?.graphicalVoiceEntries ?? [];
-        const collidingNotes: GraphicalNote[] = [];
-        for (const voiceEntry of voiceEntries) {
-            for (const candidate of voiceEntry.notes) {
-                if (candidate === restNote || candidate.sourceNote.isRest() || !candidate.sourceNote.PrintObject) {
-                    continue;
-                }
-                collidingNotes.push(candidate);
-            }
-        }
-        if (collidingNotes.length === 0) {
-            return 0;
-        }
-
-        const voiceId: number = restNote.parentVoiceEntry?.parentVoiceEntry?.ParentVoice?.VoiceId ?? 0;
-        const shiftDirection: number = VexFlowConverter.restBelongsToUpperVoice(voiceId) ? 1 : -1;
-        const hasBeam: boolean = collidingNotes.some((candidate: GraphicalNote) => !!candidate.sourceNote.NoteBeam);
-        const againstSameDirectionStem: boolean = collidingNotes.some((candidate: GraphicalNote) =>
-            candidate.parentVoiceEntry?.parentVoiceEntry?.WantedStemDirection ===
-            (shiftDirection > 0 ? StemDirectionType.Up : StemDirectionType.Down)
-        );
-        const padding: number = Math.ceil(rules.RestCollisionYPadding) * 0.5;
-        let magnitude: number = duration.includes("w") ? 1.25 : duration.includes("8") ? 2.0 : 2.5;
-        if (hasBeam) {
-            magnitude += 0.5;
-        }
-        if (againstSameDirectionStem) {
-            magnitude += 0.5;
-        }
-        magnitude += padding;
-        return VexFlowConverter.clampRestLineShift(magnitude * shiftDirection);
-    }
-
-    private static restBelongsToUpperVoice(voiceId: number): boolean {
-        return voiceId === 1 || voiceId === 5 || (voiceId > 0 && voiceId % 2 === 1);
-    }
-
     private static getSafeLineShift(note: GraphicalNote): number {
         if (!note.sourceNote.isRest()) {
             return note.lineShift;
@@ -692,7 +658,7 @@ export class VexFlowConverter {
         if (!Number.isFinite(lineShift)) {
             return 0;
         }
-        return Math.max(-4, Math.min(4, lineShift));
+        return Math.max(-3.5, Math.min(3.5, lineShift));
     }
 
     private static clampRestKeyProps(vfnote: VF.StaveNote): void {
@@ -700,7 +666,15 @@ export class VexFlowConverter {
         if (!keyProps[0] || !Number.isFinite(keyProps[0].line)) {
             return;
         }
-        keyProps[0].line = Math.max(-1, Math.min(5, keyProps[0].line));
+        const clampedLine: number = Math.max(-4, Math.min(8, keyProps[0].line));
+        if (Math.abs(clampedLine - keyProps[0].line) <= 0.0001) {
+            return;
+        }
+        if (typeof (vfnote as any).setKeyLine === "function") {
+            (vfnote as any).setKeyLine(0, clampedLine);
+        } else {
+            keyProps[0].line = clampedLine;
+        }
     }
 
     public static generateArticulations(vfnote: VF.StemmableNote, gNote: GraphicalNote,

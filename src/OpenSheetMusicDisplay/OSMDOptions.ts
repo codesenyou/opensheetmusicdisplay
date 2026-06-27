@@ -74,6 +74,8 @@ export interface IOSMDOptions {
      * e.g. Times New Roman, Helvetica.
      */
     defaultFontFamily?: string;
+    /** Font family for measure number labels. Defaults to defaultFontFamily. */
+    measureNumberFontFamily?: string;
     /** Default font style, e.g. FontStyles.Bold (1). Default Regular (0). */
     defaultFontStyle?: FontStyles;
     /** Don't show/load cursor. Will override disableCursor in drawingParameters. */
@@ -120,6 +122,8 @@ export interface IOSMDOptions {
     useXMLMeasureNumbers?: boolean;
     /** Whether to draw fingerings (only left to the note for now). Default true (unless solo part). */
     drawFingerings?: boolean;
+    /** Font family for fingering labels. XML fingering font-family values still take precedence. */
+    fingeringFontFamily?: string;
     /** Where to draw fingerings (above, below, aboveorbelow, left, right, or auto).
      * Default AboveOrBelow. Auto experimental
      */

@@ -21,7 +21,7 @@ import {unitInPixels} from "./VexFlowMusicSheetDrawer";
 import {Tuplet} from "../../VoiceData/Tuplet";
 import {RepetitionInstructionEnum, RepetitionInstruction, AlignmentType} from "../../VoiceData/Instructions/RepetitionInstruction";
 import {SystemLinePosition} from "../SystemLinePosition";
-import {StemDirectionType} from "../../VoiceData/VoiceEntry";
+import {StemDirectionType, VoiceEntry} from "../../VoiceData/VoiceEntry";
 import {GraphicalVoiceEntry} from "../GraphicalVoiceEntry";
 import {VexFlowVoiceEntry} from "./VexFlowVoiceEntry";
 import {Fraction} from "../../../Common/DataObjects/Fraction";
@@ -38,7 +38,7 @@ import { Arpeggio } from "../../VoiceData/Arpeggio";
 import { GraphicalTie } from "../GraphicalTie";
 import { Note } from "../../VoiceData/Note";
 import { TabNote } from "../../VoiceData/TabNote";
-import { CollisionBoxKind, CollisionModel, CollisionRect } from "../CollisionModel";
+import { CollisionBox, CollisionBoxKind, CollisionMagnetDirection, CollisionModel, CollisionRect } from "../CollisionModel";
 
 // type StemmableNote = VF.StemmableNote;
 
@@ -54,6 +54,22 @@ interface StemCollisionSample {
     topY: number;
     bottomY: number;
     staveNote: any;
+}
+
+interface RestPlacementObstacle {
+    rect: CollisionRect;
+    kind: CollisionBoxKind;
+    owner?: Object;
+}
+
+interface RestPlacementTarget {
+    staveNote: any;
+    graphicalNote?: GraphicalNote;
+}
+
+interface RestSemanticLanePlan {
+    targetLine?: number;
+    side: number;
 }
 
 interface TieCollisionMetadata {
@@ -116,6 +132,8 @@ export class VexFlowMeasure extends GraphicalMeasure {
     public octaveOffset: number = 3;
     /** The VexFlow Voices in the measure */
     public vfVoices: { [voiceID: number]: VF.Voice } = {};
+    /** SVG group containing the rendered measure. Used to keep measure-owned labels in the same visual group. */
+    public SVGNode: SVGGElement;
     /** Call this function (if present) to x-format all the voices in the measure */
     public formatVoices?: (width: number, parent: VexFlowMeasure) => void;
     /** The VexFlow Ties in the measure */
@@ -702,6 +720,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
         if (measureNode) {
             measureNode.classList?.add("vf-measure");
             measureNode.id = `${this.MeasureNumber}`;
+            this.SVGNode = measureNode;
         }
 
         // Draw stave lines
@@ -710,6 +729,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
         this.registerMeasureBarlineCollisionBoxes();
         this.registerStaveModifierCollisionBoxes();
         this.optimizeBeamStemDirectionCombinations();
+        this.optimizeRestTickablePlacement();
         // Draw all voices
         for (const voiceID in this.vfVoices) {
             if (this.vfVoices.hasOwnProperty(voiceID)) {
@@ -1978,6 +1998,540 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 this.registerVexFlowElementCollisionBox(modifier, this.classifyVexFlowElement(modifier));
             }
         }
+    }
+
+    private optimizeRestTickablePlacement(): void {
+        const restTargets: RestPlacementTarget[] = this.collectRestPlacementTargets();
+        if (restTargets.length === 0) {
+            return;
+        }
+
+        this.prepareTickablesForRestPlacement();
+        const noteObstacles: RestPlacementObstacle[] = this.getRestPlacementNoteObstacles();
+        const placedRestObstacles: RestPlacementObstacle[] = [];
+        for (const restTarget of restTargets) {
+            const lanePlan: RestSemanticLanePlan = this.applyRestSemanticLane(restTarget);
+            for (let attempt: number = 0; attempt < 6; attempt++) {
+                const baseRect: CollisionRect = this.getRestPlacementRect(restTarget);
+                if (!baseRect) {
+                    break;
+                }
+                const model: CollisionModel = this.createRestPlacementCollisionModel(noteObstacles.concat(placedRestObstacles));
+                const collisions: CollisionBox[] = model.getCollisions(baseRect, { padding: 0.08 });
+                if (collisions.length === 0) {
+                    break;
+                }
+                const targetRect: CollisionRect = this.findRestCollisionResolutionRect(model, baseRect, restTarget,
+                    collisions, lanePlan.side);
+                const previousLine: number = this.getRestKeyLine(restTarget);
+                this.applyRestPlacementRect(restTarget, baseRect, targetRect);
+                if (Math.abs(this.getRestKeyLine(restTarget) - previousLine) <= 0.0001) {
+                    break;
+                }
+            }
+
+            const placedRect: CollisionRect = this.getRestPlacementRect(restTarget);
+            if (placedRect) {
+                placedRestObstacles.push({
+                    rect: placedRect,
+                    kind: CollisionBoxKind.Rest,
+                    owner: restTarget.staveNote,
+                });
+            }
+        }
+    }
+
+    private applyRestSemanticLane(restTarget: RestPlacementTarget): RestSemanticLanePlan {
+        const lanePlan: RestSemanticLanePlan = this.getRestSemanticLanePlan(restTarget);
+        if (Number.isFinite(lanePlan.targetLine)) {
+            this.applyRestTargetKeyLine(restTarget, lanePlan.targetLine);
+        }
+        return lanePlan;
+    }
+
+    private getRestSemanticLanePlan(restTarget: RestPlacementTarget): RestSemanticLanePlan {
+        const baseLine: number = this.getRestUnshiftedKeyLine(restTarget);
+        if (!Number.isFinite(baseLine)) {
+            return { side: 0 };
+        }
+
+        const side: number = this.getRestSemanticSide(restTarget);
+        if (restTarget.graphicalNote?.sourceNote?.Pitch) {
+            return {
+                targetLine: this.clampRestPlacementKeyLine(this.snapRestPlacementLine(baseLine)),
+                side,
+            };
+        }
+
+        if (side === 0) {
+            return { side };
+        }
+
+        const targetLine: number = baseLine + side * this.getRestSemanticLaneOffset(restTarget);
+        return {
+            targetLine: this.clampRestPlacementKeyLine(this.snapRestPlacementLine(targetLine)),
+            side,
+        };
+    }
+
+    private getRestSemanticSide(restTarget: RestPlacementTarget): number {
+        const restVoiceStemDirection: number = this.getRestVoiceStemDirection(restTarget.graphicalNote) ??
+            this.getNearestSameVoiceRestStemDirection(restTarget.graphicalNote);
+        if (restVoiceStemDirection === this.getVexFlowStemUp()) {
+            return 1;
+        }
+        if (restVoiceStemDirection === this.getVexFlowStemDown()) {
+            return -1;
+        }
+
+        const voiceId: number = restTarget.graphicalNote?.sourceNote?.ParentVoiceEntry?.ParentVoice?.VoiceId ?? 0;
+        if (voiceId > 0) {
+            return this.restBelongsToUpperVoice(voiceId) ? 1 : -1;
+        }
+
+        return 0;
+    }
+
+    private getRestUnshiftedKeyLine(restTarget: RestPlacementTarget): number {
+        const currentLine: number = this.getRestKeyLine(restTarget);
+        const lineShift: number = Number(restTarget.graphicalNote?.lineShift ?? 0);
+        if (Number.isFinite(currentLine) && Number.isFinite(lineShift)) {
+            return currentLine - lineShift;
+        }
+        return currentLine;
+    }
+
+    private getRestSemanticLaneOffset(restTarget: RestPlacementTarget): number {
+        const duration: string = String(
+            typeof restTarget.staveNote?.getDuration === "function" ?
+                restTarget.staveNote.getDuration() :
+                restTarget.staveNote?.duration ?? ""
+        );
+        let offset: number = duration.indexOf("w") >= 0 ? 1.0 : duration.indexOf("8") >= 0 ? 1.25 : 1.5;
+        if (restTarget.graphicalNote?.sourceNote?.NoteBeam) {
+            offset += 0.25;
+        }
+        offset += Math.ceil(this.rules.RestCollisionYPadding) * 0.5;
+        return Math.max(0.5, offset);
+    }
+
+    private snapRestPlacementLine(line: number): number {
+        if (!Number.isFinite(line)) {
+            return line;
+        }
+        return Math.round(line * 2) / 2;
+    }
+
+    private getNearestSameVoiceRestStemDirection(restNote: GraphicalNote): number {
+        const restVoiceEntry: VoiceEntry = restNote?.sourceNote?.ParentVoiceEntry;
+        const voiceEntries: VoiceEntry[] = restVoiceEntry?.ParentVoice?.VoiceEntries ?? [];
+        const restVoiceEntryIndex: number = voiceEntries.indexOf(restVoiceEntry);
+        if (restVoiceEntryIndex < 0) {
+            return undefined;
+        }
+        for (let distance: number = 1; distance < voiceEntries.length; distance++) {
+            const followingDirection: number =
+                this.getPitchedVoiceEntryStemDirection(voiceEntries[restVoiceEntryIndex + distance]);
+            if (followingDirection !== undefined) {
+                return followingDirection;
+            }
+            const previousDirection: number =
+                this.getPitchedVoiceEntryStemDirection(voiceEntries[restVoiceEntryIndex - distance]);
+            if (previousDirection !== undefined) {
+                return previousDirection;
+            }
+        }
+        return undefined;
+    }
+
+    private getPitchedVoiceEntryStemDirection(voiceEntry: VoiceEntry): number {
+        if (!voiceEntry?.Notes?.some((note: Note) => !!note.Pitch && !note.isRest())) {
+            return undefined;
+        }
+        switch (voiceEntry.StemDirection) {
+            case StemDirectionType.Up:
+                return this.getVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getVexFlowStemDown();
+            default:
+                break;
+        }
+        switch (voiceEntry.StemDirectionXml) {
+            case StemDirectionType.Up:
+                return this.getVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getVexFlowStemDown();
+            default:
+                break;
+        }
+        switch (voiceEntry.WantedStemDirection) {
+            case StemDirectionType.Up:
+                return this.getVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getVexFlowStemDown();
+            default:
+                break;
+        }
+        return undefined;
+    }
+
+    private restBelongsToUpperVoice(voiceId: number): boolean {
+        return voiceId === 1 || voiceId === 5 || (voiceId > 0 && voiceId % 2 === 1);
+    }
+
+    private findRestCollisionResolutionRect(model: CollisionModel, baseRect: CollisionRect,
+                                            restTarget: RestPlacementTarget, collisions: CollisionBox[],
+                                            semanticSide: number): CollisionRect {
+        const directions: CollisionMagnetDirection[] =
+            this.getRestPlacementDirections(restTarget, collisions, semanticSide);
+        if (semanticSide !== 0) {
+            const sameLaneRect: CollisionRect = this.findFirstNonCollidingRestAxisRect(model, baseRect, directions);
+            if (sameLaneRect) {
+                return sameLaneRect;
+            }
+        }
+        return model.findClosestNonCollidingRect(baseRect, {
+            padding: 0.08,
+            stepX: 0.25,
+            stepY: 0.25,
+            maxDistance: 7,
+            preferredDirections: directions,
+        });
+    }
+
+    private findFirstNonCollidingRestAxisRect(model: CollisionModel, baseRect: CollisionRect,
+                                             directions: CollisionMagnetDirection[]): CollisionRect {
+        const step: number = 0.25;
+        const maxDistance: number = 7;
+        for (const direction of directions) {
+            const vector: { x: number, y: number } = this.getRestPlacementDirectionVector(direction);
+            if (!vector) {
+                continue;
+            }
+            for (let distance: number = step; distance <= maxDistance + 0.0001; distance += step) {
+                const candidate: CollisionRect = {
+                    x: baseRect.x + vector.x * distance,
+                    y: baseRect.y + vector.y * distance,
+                    width: baseRect.width,
+                    height: baseRect.height,
+                };
+                if (!model.collides(candidate, { padding: 0.08 })) {
+                    return candidate;
+                }
+            }
+        }
+        return undefined;
+    }
+
+    private getRestPlacementDirectionVector(direction: CollisionMagnetDirection): { x: number, y: number } {
+        switch (direction) {
+            case CollisionMagnetDirection.Up:
+                return { x: 0, y: -1 };
+            case CollisionMagnetDirection.Down:
+                return { x: 0, y: 1 };
+            case CollisionMagnetDirection.Left:
+                return { x: -1, y: 0 };
+            case CollisionMagnetDirection.Right:
+                return { x: 1, y: 0 };
+            default:
+                return undefined;
+        }
+    }
+
+    private collectRestPlacementTargets(): RestPlacementTarget[] {
+        const graphicalRestByTickable: Map<any, GraphicalNote> = new Map<any, GraphicalNote>();
+        for (const staffEntry of this.staffEntries) {
+            for (const voiceEntry of staffEntry.graphicalVoiceEntries) {
+                for (const graphicalNote of voiceEntry.notes) {
+                    const staveNote: any = this.getRestVexFlowNote(graphicalNote);
+                    if (graphicalNote.sourceNote?.isRest() &&
+                        graphicalNote.sourceNote?.PrintObject !== false &&
+                        staveNote) {
+                            graphicalRestByTickable.set(staveNote, graphicalNote);
+                    }
+                }
+            }
+        }
+
+        const restTargets: RestPlacementTarget[] = [];
+        const seen: Set<any> = new Set<any>();
+        for (const tickable of this.getAllTickables()) {
+            if (seen.has(tickable) || typeof tickable?.isRest !== "function" || !tickable.isRest()) {
+                continue;
+            }
+            seen.add(tickable);
+            restTargets.push({
+                staveNote: tickable,
+                graphicalNote: graphicalRestByTickable.get(tickable),
+            });
+        }
+        return restTargets;
+    }
+
+    private prepareTickablesForRestPlacement(): void {
+        for (const tickable of this.getAllTickables()) {
+            if (tickable && this.stave && typeof tickable.setStave === "function") {
+                tickable.setStave(this.stave);
+            }
+        }
+    }
+
+    private getRestPlacementNoteObstacles(): RestPlacementObstacle[] {
+        const obstacles: RestPlacementObstacle[] = [];
+        for (const sample of this.collectNoteheadCollisionSamples()) {
+            obstacles.push({
+                rect: this.rectPxToUnit({
+                    x: sample.x - sample.radius,
+                    y: sample.y - sample.radius,
+                    width: sample.radius * 2,
+                    height: sample.radius * 2,
+                }),
+                kind: CollisionBoxKind.Notehead,
+                owner: sample.staveNote,
+            });
+        }
+        for (const sample of this.collectStemCollisionSamples()) {
+            obstacles.push({
+                rect: this.rectPxToUnit({
+                    x: sample.x - Math.max(this.rules.StemWidth * unitInPixels, 1) / 2,
+                    y: sample.topY,
+                    width: Math.max(this.rules.StemWidth * unitInPixels, 1),
+                    height: sample.bottomY - sample.topY,
+                }),
+                kind: CollisionBoxKind.Stem,
+                owner: sample.staveNote,
+            });
+        }
+        return obstacles.filter((obstacle: RestPlacementObstacle) => CollisionModel.isUsableRect(obstacle.rect));
+    }
+
+    private createRestPlacementCollisionModel(obstacles: RestPlacementObstacle[]): CollisionModel {
+        const model: CollisionModel = new CollisionModel();
+        for (const obstacle of obstacles) {
+            model.registerRect(obstacle.rect, obstacle.kind, obstacle.owner, obstacle.owner);
+        }
+        return model;
+    }
+
+    private getRestPlacementDirections(restTarget: RestPlacementTarget, collisions: CollisionBox[],
+                                       semanticSide: number = 0): CollisionMagnetDirection[] {
+        if (semanticSide > 0) {
+            return [
+                CollisionMagnetDirection.Up,
+                CollisionMagnetDirection.Down,
+            ];
+        }
+        if (semanticSide < 0) {
+            return [
+                CollisionMagnetDirection.Down,
+                CollisionMagnetDirection.Up,
+            ];
+        }
+
+        const stemDirection: number = this.getCollisionStemDirection(collisions);
+        if (stemDirection === this.getVexFlowStemUp()) {
+            return [
+                CollisionMagnetDirection.Down,
+                CollisionMagnetDirection.Up,
+            ];
+        }
+        if (stemDirection === this.getVexFlowStemDown()) {
+            return [
+                CollisionMagnetDirection.Up,
+                CollisionMagnetDirection.Down,
+            ];
+        }
+        return [
+            CollisionMagnetDirection.Up,
+            CollisionMagnetDirection.Down,
+        ];
+    }
+
+    private getCollisionStemDirection(collisions: CollisionBox[]): number {
+        const stemCollision: CollisionBox = collisions.find((collision: CollisionBox) =>
+            collision.kind === CollisionBoxKind.Stem && this.getVexFlowStemDirection(collision.owner) !== undefined);
+        if (stemCollision) {
+            return this.getVexFlowStemDirection(stemCollision.owner);
+        }
+        const noteCollision: CollisionBox = collisions.find((collision: CollisionBox) =>
+            collision.kind === CollisionBoxKind.Notehead && this.getVexFlowStemDirection(collision.owner) !== undefined);
+        return noteCollision ? this.getVexFlowStemDirection(noteCollision.owner) : undefined;
+    }
+
+    private getRestVoiceStemDirection(restNote: GraphicalNote): number {
+        switch (restNote?.parentVoiceEntry?.parentVoiceEntry?.StemDirection) {
+            case StemDirectionType.Up:
+                return this.getVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getVexFlowStemDown();
+            default:
+                break;
+        }
+        switch (restNote?.parentVoiceEntry?.parentVoiceEntry?.WantedStemDirection) {
+            case StemDirectionType.Up:
+                return this.getVexFlowStemUp();
+            case StemDirectionType.Down:
+                return this.getVexFlowStemDown();
+            default:
+                break;
+        }
+        return undefined;
+    }
+
+    private getVexFlowStemDirection(staveNote: any): number {
+        const direction: number = Number(
+            typeof staveNote?.getStemDirection === "function" ? staveNote.getStemDirection() : staveNote?.stem_direction
+        );
+        if (direction === this.getVexFlowStemUp() || direction === this.getVexFlowStemDown()) {
+            return direction;
+        }
+        return undefined;
+    }
+
+    private applyRestTargetKeyLine(restTarget: RestPlacementTarget, targetLine: number): number {
+        if (!Number.isFinite(targetLine)) {
+            return 0;
+        }
+        const previousLine: number = this.getRestKeyLine(restTarget);
+        return this.applyRestKeyLineDelta(restTarget, targetLine - previousLine);
+    }
+
+    private applyRestPlacementRect(restTarget: RestPlacementTarget, baseRect: CollisionRect, targetRect: CollisionRect): void {
+        if (!targetRect || !CollisionModel.isUsableRect(targetRect)) {
+            return;
+        }
+        const deltaY: number = targetRect.y - baseRect.y;
+        if (!Number.isFinite(deltaY) || Math.abs(deltaY) <= 0.0001) {
+            return;
+        }
+        this.applyRestKeyLineDelta(restTarget, -deltaY);
+    }
+
+    private applyRestKeyLineDelta(restTarget: RestPlacementTarget, lineDelta: number): number {
+        const appliedLineDelta: number = this.shiftRestKeyLine(restTarget, lineDelta);
+        if (Math.abs(appliedLineDelta) <= 0.0001) {
+            return 0;
+        }
+        const restNote: GraphicalNote = restTarget.graphicalNote;
+        if (restNote) {
+            restNote.lineShift = this.clampRestPlacementLineShift((restNote.lineShift ?? 0) + appliedLineDelta);
+            restNote.PositionAndShape.RelativePosition.y -= appliedLineDelta;
+        }
+        return appliedLineDelta;
+    }
+
+    private shiftRestKeyLine(restTarget: RestPlacementTarget, lineDelta: number): number {
+        const vfNote: any = restTarget.staveNote;
+        const keyProps: any[] = typeof vfNote?.getKeyProps === "function" ? vfNote.getKeyProps() : vfNote?.keyProps;
+        const index: number = this.getRestVexFlowNoteIndex(restTarget.graphicalNote);
+        const keyProp: any = keyProps?.[index] ?? keyProps?.[0];
+        const previousLine: number = Number(keyProp?.line);
+        if (!keyProp || !Number.isFinite(previousLine) || !Number.isFinite(lineDelta)) {
+            return 0;
+        }
+        const nextLine: number = this.clampRestPlacementKeyLine(previousLine + lineDelta);
+        const appliedLineDelta: number = nextLine - previousLine;
+        if (Math.abs(appliedLineDelta) <= 0.0001) {
+            return 0;
+        }
+        if (typeof vfNote.setKeyLine === "function") {
+            vfNote.setKeyLine(index, nextLine);
+        } else {
+            keyProp.line = nextLine;
+        }
+        this.refreshRestStaveNoteY(vfNote);
+        if (restTarget.graphicalNote) {
+            restTarget.graphicalNote.staffLine = nextLine;
+        }
+        return appliedLineDelta;
+    }
+
+    private refreshRestStaveNoteY(vfNote: any): void {
+        const stave: any = typeof vfNote?.getStave === "function" ? vfNote.getStave() : vfNote?.stave;
+        if (stave && typeof vfNote?.setStave === "function") {
+            vfNote.setStave(stave);
+        }
+    }
+
+    private getRestPlacementRect(restTarget: RestPlacementTarget): CollisionRect {
+        const vfNote: any = restTarget.staveNote;
+        if (!vfNote) {
+            return undefined;
+        }
+        this.refreshRestStaveNoteY(vfNote);
+        const rect: CollisionRect = this.getVexFlowElementRect(vfNote) ??
+            this.getRestGlyphCollisionRectPx(restTarget, vfNote);
+        return rect ? this.rectPxToUnit(rect) : undefined;
+    }
+
+    private getRestGlyphCollisionRectPx(restTarget: RestPlacementTarget, vfNote: any): CollisionRect {
+        const stave: any = typeof vfNote.getStave === "function" ? vfNote.getStave() : vfNote.stave;
+        if (!stave) {
+            return undefined;
+        }
+        const index: number = this.getRestVexFlowNoteIndex(restTarget.graphicalNote);
+        const keyProps: any[] = typeof vfNote.getKeyProps === "function" ? vfNote.getKeyProps() : vfNote.keyProps;
+        const keyLine: number = Number(keyProps?.[index]?.line ?? keyProps?.[0]?.line);
+        const ys: number[] = typeof vfNote.getYs === "function" ? vfNote.getYs() : [];
+        const centerY: number = Number.isFinite(ys?.[index]) ? ys[index] :
+            Number.isFinite(keyLine) && typeof stave.getYForNote === "function" ?
+            Number(stave.getYForNote(keyLine)) : undefined;
+        const xs: number[] = typeof vfNote.getXs === "function" ? vfNote.getXs() : [];
+        const absoluteX: number = Number(typeof vfNote.getAbsoluteX === "function" ? vfNote.getAbsoluteX() : vfNote.getX?.());
+        const glyphMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(vfNote.glyph, vfNote);
+        const glyphWidth: number = Number(typeof vfNote.getGlyphWidth === "function" ? vfNote.getGlyphWidth() : glyphMetrics.width);
+        const staffSpace: number = Number(stave?.getSpacingBetweenLines?.() ?? unitInPixels);
+        const width: number = Math.min(Math.max(
+            Number.isFinite(glyphWidth) ? glyphWidth : 0,
+            glyphMetrics.width,
+            staffSpace * 0.85,
+            10
+        ), staffSpace * 1.6);
+        const height: number = Math.min(Math.max(
+            glyphMetrics.height,
+            staffSpace * 1.6,
+            14
+        ), staffSpace * 2.3);
+        const centerX: number = Number.isFinite(xs?.[index]) ? xs[index] :
+            Number.isFinite(absoluteX) ? absoluteX + width / 2 : undefined;
+        if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+            return undefined;
+        }
+        return this.normalizePxRect({
+            x: centerX - width / 2,
+            y: centerY - height / 2,
+            width,
+            height,
+        }, 0.4);
+    }
+
+    private getRestVexFlowNote(restNote: GraphicalNote): any {
+        return (restNote as VexFlowGraphicalNote)?.vfnote?.[0];
+    }
+
+    private getRestVexFlowNoteIndex(restNote: GraphicalNote): number {
+        const index: number = Number((restNote as VexFlowGraphicalNote)?.vfnote?.[1] ??
+            (restNote as VexFlowGraphicalNote)?.vfnoteIndex ?? 0);
+        return Number.isFinite(index) ? index : 0;
+    }
+
+    private getRestKeyLine(restTarget: RestPlacementTarget): number {
+        const vfNote: any = restTarget.staveNote;
+        const keyProps: any[] = typeof vfNote?.getKeyProps === "function" ? vfNote.getKeyProps() : vfNote?.keyProps;
+        const index: number = this.getRestVexFlowNoteIndex(restTarget.graphicalNote);
+        const line: number = Number(keyProps?.[index]?.line ?? keyProps?.[0]?.line);
+        return Number.isFinite(line) ? line : 0;
+    }
+
+    private clampRestPlacementLineShift(lineShift: number): number {
+        if (!Number.isFinite(lineShift)) {
+            return 0;
+        }
+        return Math.max(-6, Math.min(6, lineShift));
+    }
+
+    private clampRestPlacementKeyLine(line: number): number {
+        return Math.max(-4, Math.min(8, line));
     }
 
     private registerStaveModifierCollisionBoxes(): void {

@@ -356,6 +356,7 @@ export abstract class MusicSheetDrawer {
             for (const measureNumberLabel of musicSystem.MeasureNumberLabels) {
                 measureNumberLabel.SVGNode = this.drawLabel(measureNumberLabel, <number>GraphicalLayers.Notes);
                 (measureNumberLabel.SVGNode as SVGGElement)?.classList?.add("measure-number");
+                this.afterMeasureNumberLabelDrawn(measureNumberLabel, musicSystem);
             }
         }
         for (const staffLine of musicSystem.StaffLines) {
@@ -403,6 +404,10 @@ export abstract class MusicSheetDrawer {
         if (this.bottomLineVisible) {
             this.drawBottomLine(staffLine);
         }
+    }
+
+    protected afterMeasureNumberLabelDrawn(measureNumberLabel: GraphicalLabel, musicSystem: MusicSystem): void {
+        // Renderer-specific hook.
     }
 
     protected drawLyricLines(lyricLines: GraphicalLine[], staffLine: StaffLine): void {

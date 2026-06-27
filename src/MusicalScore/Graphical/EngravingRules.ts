@@ -176,6 +176,7 @@ export class EngravingRules {
     /** y offset added to avoid collisions of rehearsal marks (e.g. "A" or "Verse") with multiple measure rest numbers. */
     public RehearsalMarkYOffsetAddedForRehearsalMarks: number;
     public RehearsalMarkFontSize: number;
+    public MeasureNumberFontFamily: string;
     public MeasureNumberLabelHeight: number;
     public MeasureNumberLabelOffset: number;
     public MeasureNumberLabelXOffset: number;
@@ -489,6 +490,7 @@ export class EngravingRules {
     public FingeringPositionGrace: PlacementEnum;
     public FingeringInsideStafflines: boolean;
     public FingeringLabelFontHeight: number;
+    public FingeringFontFamily: string;
     public FingeringOffsetX: number;
     public FingeringOffsetY: number;
     public FingeringPaddingY: number;
@@ -722,6 +724,7 @@ export class EngravingRules {
         this.RehearsalMarkYOffsetAddedForRehearsalMarks = -12;
         this.RehearsalMarkYOffset = 0; // user defined
         this.RehearsalMarkFontSize = 10; // vexflow default: 12, too big with chord symbols
+        this.MeasureNumberFontFamily = undefined;
 
         // Tuplets, MeasureNumber and TupletNumber Labels
         this.MeasureNumberLabelHeight = 1.5 * EngravingRules.unit;
@@ -953,6 +956,7 @@ export class EngravingRules {
         this.FingeringPositionGrace = PlacementEnum.Left;
         this.FingeringInsideStafflines = false;
         this.FingeringLabelFontHeight = 1.7;
+        this.FingeringFontFamily = undefined;
         this.FingeringOffsetX = 0.0;
         this.FingeringOffsetY = 0.0;
         this.FingeringPaddingY = -0.2;
