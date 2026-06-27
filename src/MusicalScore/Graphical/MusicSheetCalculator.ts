@@ -100,6 +100,31 @@ interface FingeringPxRect {
     height: number;
 }
 
+interface FingeringPlacementWorkItem {
+    fingering: TechnicalInstruction;
+    label: GraphicalLabel;
+    placement: PlacementEnum;
+    stackIndex: number;
+    ownerCenterX: number;
+    initialY: number;
+    labelHeight: number;
+    initialRect: FingeringCollisionRect;
+    placedRect?: FingeringCollisionRect;
+}
+
+interface FingeringLabelCandidate {
+    dx: number;
+    dy: number;
+    rect: FingeringCollisionRect;
+    cost: number;
+}
+
+interface FingeringGroupResolution {
+    dy: number;
+    candidates: FingeringLabelCandidate[];
+    cost: number;
+}
+
 interface FingeringDebugSvgRect {
     x: number;
     y: number;
@@ -4388,63 +4413,217 @@ export abstract class MusicSheetCalculator {
         return rects;
     }
 
-    private getFingeringOutwardClearance(rect: FingeringCollisionRect, placement: PlacementEnum,
-                                         collisionRects: FingeringCollisionRect[]): number {
+    private getFingeringBlockingCollisionKinds(rect: FingeringCollisionRect,
+                                               collisionRects: FingeringCollisionRect[]): Set<string> {
         const padding: number = 0.08;
         const labelRect: FingeringCollisionRect = this.expandFingeringRect(rect, padding);
-        let clearance: number = 0;
+        const kinds: Set<string> = new Set<string>();
         for (const collisionRect of collisionRects) {
             const obstacleRect: FingeringCollisionRect = this.expandFingeringRect(collisionRect, padding);
-            const overlapArea: number = this.getRectOverlapArea(labelRect, obstacleRect);
-            if (overlapArea <= 0) {
-                continue;
+            if (this.getRectOverlapArea(labelRect, obstacleRect) > 0) {
+                kinds.add(collisionRect.kind ?? "unknown");
             }
-            const requiredClearance: number = placement === PlacementEnum.Above
-                ? labelRect.bottom - obstacleRect.top
-                : obstacleRect.bottom - labelRect.top;
-            clearance = Math.max(clearance, requiredClearance + padding);
         }
-        return Math.max(0, clearance);
+        return kinds;
     }
 
-    private getFingeringCollisionOffsetY(baseRect: FingeringCollisionRect, placement: PlacementEnum,
-                                         collisionRects: FingeringCollisionRect[],
-                                         labelHeight: number, stackIndex: number): number {
-        const outwardSign: number = placement === PlacementEnum.Above ? -1 : 1;
-        const maxOutwardShift: number = Math.max(0.75, Math.min(2.15, labelHeight * 0.8 + stackIndex * 0.18 + 0.65));
-        const collidesAtShift: (shift: number) => boolean = (shift: number): boolean => {
-            const shiftedRect: FingeringCollisionRect = this.shiftFingeringRect(baseRect, 0, shift * outwardSign);
-            return this.getFingeringOutwardClearance(shiftedRect, placement, collisionRects) > 0;
-        };
-        if (!collidesAtShift(0)) {
-            return 0;
-        }
+    private getRelevantFingeringGroupCollisionRects(items: FingeringPlacementWorkItem[],
+                                                    collisionRects: FingeringCollisionRect[],
+                                                    horizontalSearchRadius: number): FingeringCollisionRect[] {
+        const padding: number = 0.12;
+        const searchLeft: number = Math.min(...items.map((item: FingeringPlacementWorkItem) => item.initialRect.left)) -
+            horizontalSearchRadius - padding;
+        const searchRight: number = Math.max(...items.map((item: FingeringPlacementWorkItem) => item.initialRect.right)) +
+            horizontalSearchRadius + padding;
+        return collisionRects.filter((rect: FingeringCollisionRect) => rect.right >= searchLeft && rect.left <= searchRight);
+    }
 
-        const step: number = 0.04;
-        let lowerCollidingShift: number = 0;
-        let upperClearShift: number = undefined;
-        for (let outwardShift: number = step; outwardShift <= maxOutwardShift + 0.0001; outwardShift += step) {
-            const clampedShift: number = Math.min(outwardShift, maxOutwardShift);
-            if (collidesAtShift(clampedShift)) {
-                lowerCollidingShift = clampedShift;
+    private getFingeringHorizontalNudgeOffsets(baseRect: FingeringCollisionRect, stacked: boolean): number[] {
+        const labelWidth: number = Math.max(0.1, baseRect.right - baseRect.left);
+        const step: number = Math.max(0.12, Math.min(stacked ? 0.18 : 0.22, labelWidth * 0.2));
+        const maxShift: number = stacked ?
+            Math.max(0.22, Math.min(0.36, labelWidth * 0.36)) :
+            Math.max(0.32, Math.min(0.58, labelWidth * 0.5));
+        const offsets: number[] = [0];
+        for (let shift: number = step; shift <= maxShift + 0.0001; shift += step) {
+            offsets.push(-shift, shift);
+        }
+        return offsets;
+    }
+
+    private shouldTryFingeringHorizontalNudge(blockingKinds: Set<string>, allowNoteBody: boolean): boolean {
+        if (blockingKinds.size === 0) {
+            return false;
+        }
+        for (const kind of blockingKinds) {
+            if (kind !== "stem" && kind !== "notehead" && !(allowNoteBody && kind === "note")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private getFingeringVerticalSearchOffsets(items: FingeringPlacementWorkItem[], placement: PlacementEnum): number[] {
+        const outwardSign: number = placement === PlacementEnum.Above ? -1 : 1;
+        const maxLabelHeight: number = Math.max(...items.map((item: FingeringPlacementWorkItem) => item.labelHeight));
+        const maxStackIndex: number = Math.max(...items.map((item: FingeringPlacementWorkItem) => item.stackIndex));
+        const maxOutwardShift: number = Math.max(
+            3.5,
+            Math.min(6.2, maxLabelHeight * 1.1 + maxStackIndex * this.getFingeringStackSpacing(maxLabelHeight) + 3.2)
+        );
+        const offsets: number[] = [0];
+        for (let outwardShift: number = 0.04; outwardShift <= maxOutwardShift + 0.0001;) {
+            offsets.push(outwardShift * outwardSign);
+            outwardShift += outwardShift < 2.4 ? 0.04 : 0.12;
+        }
+        return offsets;
+    }
+
+    private getFingeringCollisionKindWeight(kind: string, stacked: boolean): number {
+        switch (kind) {
+            case "existing-fingering":
+                return 90;
+            case "measure-number":
+                return 70;
+            case "notehead":
+                return 40;
+            case "stem":
+                return stacked ? 5 : 28;
+            case "note":
+                return 16;
+            case "beam":
+                return stacked ? 3 : 8;
+            case "ornament":
+                return 20;
+            case "articulation":
+                return 18;
+            case "ornament-reserve":
+                return 14;
+            case "tie":
+                return 12;
+            default:
+                return 14;
+        }
+    }
+
+    private getFingeringCollisionCost(rect: FingeringCollisionRect,
+                                      collisionRects: FingeringCollisionRect[],
+                                      stacked: boolean): number {
+        const labelRect: FingeringCollisionRect = this.expandFingeringRect(rect, 0.035);
+        let cost: number = 0;
+        for (const collisionRect of collisionRects) {
+            const obstacleRect: FingeringCollisionRect = this.expandFingeringRect(collisionRect, 0.035);
+            const paddedOverlap: number = this.getRectOverlapArea(labelRect, obstacleRect);
+            if (paddedOverlap <= 0) {
                 continue;
             }
-            upperClearShift = clampedShift;
-            break;
+            const actualOverlap: number = this.getRectOverlapArea(rect, collisionRect);
+            const kindWeight: number = this.getFingeringCollisionKindWeight(collisionRect.kind ?? "unknown", stacked);
+            const rectPenalty: number = collisionRect.penalty ?? 1;
+            const softFactor: number = collisionRect.soft ? 0.45 : 1;
+            cost += (actualOverlap * 120 + paddedOverlap * 16) * kindWeight * rectPenalty * softFactor;
         }
-        if (!Number.isFinite(upperClearShift)) {
-            return maxOutwardShift * outwardSign;
-        }
+        return cost;
+    }
 
-        for (let i: number = 0; i < 8; i++) {
-            const midpointShift: number = (lowerCollidingShift + upperClearShift) / 2;
-            if (collidesAtShift(midpointShift)) {
-                lowerCollidingShift = midpointShift;
-            } else {
-                upperClearShift = midpointShift;
+    private getFingeringVerticalMovementCost(dy: number, groupSize: number): number {
+        const magnitude: number = Math.abs(dy);
+        const stackMultiplier: number = 1 + Math.max(0, groupSize - 1) * 0.68;
+        const softStackLimit: number = groupSize > 1 ? 2.15 : Number.POSITIVE_INFINITY;
+        const excessStackShift: number = Math.max(0, magnitude - softStackLimit);
+        return (magnitude * 9 + magnitude * magnitude * 3.2) * stackMultiplier +
+            excessStackShift * 60 + excessStackShift * excessStackShift * 220;
+    }
+
+    private getFingeringHorizontalMovementCost(dx: number, stacked: boolean): number {
+        const magnitude: number = Math.abs(dx);
+        const linearWeight: number = stacked ? 85 : 40;
+        const quadraticWeight: number = stacked ? 140 : 70;
+        return magnitude * linearWeight + magnitude * magnitude * quadraticWeight;
+    }
+
+    private getFingeringCandidateHorizontalOffsets(rect: FingeringCollisionRect,
+                                                   collisionRects: FingeringCollisionRect[],
+                                                   stacked: boolean): number[] {
+        const blockingKinds: Set<string> = this.getFingeringBlockingCollisionKinds(rect, collisionRects);
+        const allowNoteBodyNudge: boolean = !stacked;
+        return this.shouldTryFingeringHorizontalNudge(blockingKinds, allowNoteBodyNudge) ?
+            this.getFingeringHorizontalNudgeOffsets(rect, stacked) : [0];
+    }
+
+    private getBestFingeringLabelCandidate(item: FingeringPlacementWorkItem, dy: number,
+                                           collisionRects: FingeringCollisionRect[],
+                                           stacked: boolean, measure: GraphicalMeasure,
+                                           line: StaffLine): FingeringLabelCandidate {
+        const shiftedRect: FingeringCollisionRect = this.shiftFingeringRect(item.initialRect, 0, dy);
+        const horizontalOffsets: number[] =
+            this.getFingeringCandidateHorizontalOffsets(shiftedRect, collisionRects, stacked);
+        let bestCandidate: FingeringLabelCandidate;
+        for (const dx of horizontalOffsets) {
+            const snappedX: number = this.snapFingeringXToMeasure(item.label, item.ownerCenterX + dx, measure, line);
+            const effectiveDx: number = snappedX - item.ownerCenterX;
+            const rect: FingeringCollisionRect = this.shiftFingeringRect(item.initialRect, effectiveDx, dy);
+            const cost: number = this.getFingeringCollisionCost(rect, collisionRects, stacked) +
+                this.getFingeringHorizontalMovementCost(effectiveDx, stacked);
+            if (!bestCandidate || cost < bestCandidate.cost - 0.0001 ||
+                (Math.abs(cost - bestCandidate.cost) <= 0.0001 && Math.abs(effectiveDx) < Math.abs(bestCandidate.dx))) {
+                    bestCandidate = { dx: effectiveDx, dy, rect, cost };
             }
         }
-        return upperClearShift * outwardSign;
+        return bestCandidate;
+    }
+
+    private getFingeringStackOverlapCost(candidates: FingeringLabelCandidate[]): number {
+        let cost: number = 0;
+        for (let i: number = 0; i < candidates.length; i++) {
+            for (let j: number = i + 1; j < candidates.length; j++) {
+                const actualOverlap: number = this.getRectOverlapArea(candidates[i].rect, candidates[j].rect);
+                const paddedOverlap: number = this.getRectOverlapArea(
+                    this.expandFingeringRect(candidates[i].rect, 0.025),
+                    this.expandFingeringRect(candidates[j].rect, 0.025)
+                );
+                cost += actualOverlap * 10000 + paddedOverlap * 800;
+            }
+        }
+        return cost;
+    }
+
+    private getFingeringStackAlignmentCost(candidates: FingeringLabelCandidate[]): number {
+        if (candidates.length < 2) {
+            return 0;
+        }
+        const meanDx: number = candidates.reduce(
+            (sum: number, candidate: FingeringLabelCandidate) => sum + candidate.dx, 0) / candidates.length;
+        return candidates.reduce((cost: number, candidate: FingeringLabelCandidate) =>
+            cost + Math.abs(candidate.dx) * 26 + Math.abs(candidate.dx - meanDx) * 32, 0);
+    }
+
+    private getFingeringGroupResolution(items: FingeringPlacementWorkItem[],
+                                        collisionRects: FingeringCollisionRect[],
+                                        measure: GraphicalMeasure, line: StaffLine): FingeringGroupResolution {
+        const placement: PlacementEnum = items[0].placement;
+        const stacked: boolean = items.length > 1;
+        const horizontalSearchRadius: number = Math.max(...items.map((item: FingeringPlacementWorkItem) =>
+            Math.max(...this.getFingeringHorizontalNudgeOffsets(item.initialRect, stacked)
+                .map((offset: number) => Math.abs(offset)))));
+        const relevantCollisionRects: FingeringCollisionRect[] =
+            this.getRelevantFingeringGroupCollisionRects(items, collisionRects, horizontalSearchRadius);
+        let bestResolution: FingeringGroupResolution;
+        for (const dy of this.getFingeringVerticalSearchOffsets(items, placement)) {
+            const candidates: FingeringLabelCandidate[] = items.map((item: FingeringPlacementWorkItem) =>
+                this.getBestFingeringLabelCandidate(item, dy, relevantCollisionRects, stacked, measure, line));
+            const collisionCost: number = candidates.reduce(
+                (sum: number, candidate: FingeringLabelCandidate) => sum + candidate.cost, 0);
+            const cost: number = collisionCost +
+                this.getFingeringVerticalMovementCost(dy, items.length) +
+                this.getFingeringStackOverlapCost(candidates) +
+                this.getFingeringStackAlignmentCost(candidates);
+            if (!bestResolution || cost < bestResolution.cost - 0.0001 ||
+                (Math.abs(cost - bestResolution.cost) <= 0.0001 && Math.abs(dy) < Math.abs(bestResolution.dy))) {
+                    bestResolution = { dy, candidates, cost };
+            }
+        }
+        return bestResolution;
     }
 
     private getFingeringDebugScope(): any {
@@ -4733,14 +4912,15 @@ export abstract class MusicSheetCalculator {
         );
     }
 
-    private placeFingeringLabel(label: GraphicalLabel, fingering: TechnicalInstruction, gse: GraphicalStaffEntry,
-                                measure: GraphicalMeasure, line: StaffLine, system: MusicSystem,
-                                stackIndex: number): PlacementEnum {
+    private createFingeringPlacementWorkItem(label: GraphicalLabel, fingering: TechnicalInstruction,
+                                             gse: GraphicalStaffEntry, measure: GraphicalMeasure,
+                                             line: StaffLine, stackIndex: number): FingeringPlacementWorkItem {
         const placement: PlacementEnum = this.getFingeringPlacement(measure, fingering);
         const owningNote: GraphicalNote = this.getFingeringOwnerNote(gse, fingering);
         const anchorY: number = this.getFingeringAnchorY(placement);
         const staffEntryPositionX: number =
             gse.PositionAndShape.RelativePosition.x + measure.PositionAndShape.RelativePosition.x;
+        const labelHeight: number = this.getFingeringLabelHeight(label);
         const ownerRect: FingeringCollisionRect = owningNote ?
             this.getBoundingBoxRectInStaffLine(owningNote.PositionAndShape, line, false) : undefined;
         const ownerCenterX: number = this.snapFingeringXToMeasure(
@@ -4749,29 +4929,118 @@ export abstract class MusicSheetCalculator {
             measure,
             line
         );
-        const collisionRects: FingeringCollisionRect[] = this.getFingeringCollisionRects(system, line, measure, placement, gse);
         const usableAnchorY: number = Number.isFinite(anchorY) ? anchorY :
             (placement === PlacementEnum.Above ? 0 : this.rules.StaffHeight);
-        const labelHeight: number = this.getFingeringLabelHeight(label);
         const distance: number = 0.18 + stackIndex * this.getFingeringStackSpacing(labelHeight);
-        let y: number = placement === PlacementEnum.Above ? usableAnchorY - distance : usableAnchorY + distance;
+        const y: number = placement === PlacementEnum.Above ? usableAnchorY - distance : usableAnchorY + distance;
         this.setFingeringLabelPosition(label, ownerCenterX, y, placement);
-        const initialLabelRect: FingeringCollisionRect = this.getLabelRect(label);
-        y += this.getFingeringCollisionOffsetY(this.getLabelRect(label), placement, collisionRects, labelHeight, stackIndex);
-        this.setFingeringLabelPosition(label, ownerCenterX, y, placement);
-        this.recordFingeringDebugPlacement(
-            label,
+        return {
             fingering,
-            measure,
-            line,
-            system,
+            label,
             placement,
             stackIndex,
-            collisionRects,
-            initialLabelRect,
-            this.getLabelRect(label)
-        );
-        return placement;
+            ownerCenterX,
+            initialY: y,
+            labelHeight,
+            initialRect: this.getLabelRect(label)
+        };
+    }
+
+    private getFingeringGroupDebugCollisionRects(items: FingeringPlacementWorkItem[],
+                                                 currentItem: FingeringPlacementWorkItem,
+                                                 collisionRects: FingeringCollisionRect[],
+                                                 measure: GraphicalMeasure,
+                                                 line: StaffLine): FingeringCollisionRect[] {
+        const siblingRects: FingeringCollisionRect[] = [];
+        for (let itemIndex: number = 0; itemIndex < items.length; itemIndex++) {
+            const item: FingeringPlacementWorkItem = items[itemIndex];
+            if (item === currentItem || !item.placedRect) {
+                continue;
+            }
+            this.addRectIfValid(siblingRects, this.withFingeringDebugSource({
+                ...item.placedRect,
+                isFingering: true,
+                kind: "existing-fingering"
+            }, measure, line, `stack-fingering:${itemIndex}`));
+        }
+        return collisionRects.concat(siblingRects);
+    }
+
+    private shiftFingeringPlacementWorkItem(item: FingeringPlacementWorkItem, dy: number): void {
+        item.initialY += dy;
+        this.setFingeringLabelPosition(item.label, item.ownerCenterX, item.initialY, item.placement);
+        item.initialRect = this.getLabelRect(item.label);
+    }
+
+    private getFingeringHorizontalOverlap(a: FingeringCollisionRect, b: FingeringCollisionRect): number {
+        return Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    }
+
+    private separateOverlappingFingeringStack(items: FingeringPlacementWorkItem[]): void {
+        if (items.length < 2) {
+            return;
+        }
+        const placement: PlacementEnum = items[0].placement;
+        const outwardSign: number = placement === PlacementEnum.Above ? -1 : 1;
+        const stackGap: number = 0.04;
+        const sortedItems: FingeringPlacementWorkItem[] = items.slice().sort(
+            (a: FingeringPlacementWorkItem, b: FingeringPlacementWorkItem) => a.stackIndex - b.stackIndex);
+        for (let itemIndex: number = 1; itemIndex < sortedItems.length; itemIndex++) {
+            const item: FingeringPlacementWorkItem = sortedItems[itemIndex];
+            let requiredShift: number = 0;
+            for (let previousIndex: number = 0; previousIndex < itemIndex; previousIndex++) {
+                const previousItem: FingeringPlacementWorkItem = sortedItems[previousIndex];
+                if (this.getFingeringHorizontalOverlap(item.initialRect, previousItem.initialRect) <= 0) {
+                    continue;
+                }
+                const overlap: number = placement === PlacementEnum.Above ?
+                    item.initialRect.bottom - previousItem.initialRect.top + stackGap :
+                    previousItem.initialRect.bottom - item.initialRect.top + stackGap;
+                requiredShift = Math.max(requiredShift, overlap);
+            }
+            if (requiredShift <= 0) {
+                continue;
+            }
+            for (let shiftedIndex: number = itemIndex; shiftedIndex < sortedItems.length; shiftedIndex++) {
+                this.shiftFingeringPlacementWorkItem(sortedItems[shiftedIndex], requiredShift * outwardSign);
+            }
+        }
+    }
+
+    private placeFingeringLabelGroup(items: FingeringPlacementWorkItem[], gse: GraphicalStaffEntry,
+                                     measure: GraphicalMeasure, line: StaffLine, system: MusicSystem): void {
+        if (items.length === 0) {
+            return;
+        }
+        this.separateOverlappingFingeringStack(items);
+        const placement: PlacementEnum = items[0].placement;
+        const collisionRects: FingeringCollisionRect[] = this.getFingeringCollisionRects(system, line, measure, placement, gse);
+        const resolution: FingeringGroupResolution = this.getFingeringGroupResolution(items, collisionRects, measure, line);
+        for (let itemIndex: number = 0; itemIndex < items.length; itemIndex++) {
+            const item: FingeringPlacementWorkItem = items[itemIndex];
+            const candidate: FingeringLabelCandidate = resolution.candidates[itemIndex];
+            const resolvedX: number = this.snapFingeringXToMeasure(item.label, item.ownerCenterX + candidate.dx, measure, line);
+            const resolvedY: number = item.initialY + candidate.dy;
+            this.setFingeringLabelPosition(item.label, resolvedX, resolvedY, item.placement);
+            item.placedRect = this.getLabelRect(item.label);
+        }
+
+        for (const item of items) {
+            const debugCollisionRects: FingeringCollisionRect[] =
+                this.getFingeringGroupDebugCollisionRects(items, item, collisionRects, measure, line);
+            this.recordFingeringDebugPlacement(
+                item.label,
+                item.fingering,
+                measure,
+                line,
+                system,
+                item.placement,
+                item.stackIndex,
+                debugCollisionRects,
+                item.initialRect,
+                item.placedRect
+            );
+        }
     }
 
     private updateFingeringSkyBottomLine(label: GraphicalLabel, placement: PlacementEnum, line: StaffLine): void {
@@ -4828,6 +5097,7 @@ export abstract class MusicSheetCalculator {
                                 sourceIndex: index
                             })).sort((a, b) => a.slot - b.slot || a.sourceIndex - b.sourceIndex);
 
+                        const placementGroups: { placement: PlacementEnum, items: FingeringPlacementWorkItem[] }[] = [];
                         for (const placementItem of placementItems) {
                             const fingering: TechnicalInstruction = placementItem.fingering;
                             const placement: PlacementEnum = this.getFingeringPlacement(measure, fingering);
@@ -4839,10 +5109,24 @@ export abstract class MusicSheetCalculator {
                             if (fingering.fontFamily) {
                                 label.fontFamily = fingering.fontFamily;
                             }
-                            const acceptedPlacement: PlacementEnum =
-                                this.placeFingeringLabel(gLabel, fingering, gse, measure, line, system, placementItem.slot);
-                            gse.FingeringEntries.push(gLabel);
-                            this.updateFingeringSkyBottomLine(gLabel, acceptedPlacement, line);
+                            const workItem: FingeringPlacementWorkItem =
+                                this.createFingeringPlacementWorkItem(gLabel, fingering, gse, measure, line, placementItem.slot);
+                            let placementGroup: { placement: PlacementEnum, items: FingeringPlacementWorkItem[] } =
+                                placementGroups.find((group: { placement: PlacementEnum, items: FingeringPlacementWorkItem[] }) =>
+                                    group.placement === workItem.placement);
+                            if (!placementGroup) {
+                                placementGroup = { placement: workItem.placement, items: [] };
+                                placementGroups.push(placementGroup);
+                            }
+                            placementGroup.items.push(workItem);
+                        }
+
+                        for (const placementGroup of placementGroups) {
+                            this.placeFingeringLabelGroup(placementGroup.items, gse, measure, line, system);
+                            for (const item of placementGroup.items) {
+                                gse.FingeringEntries.push(item.label);
+                                this.updateFingeringSkyBottomLine(item.label, item.placement, line);
+                            }
                         }
                     }
                 }
