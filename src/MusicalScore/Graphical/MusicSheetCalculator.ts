@@ -17,7 +17,7 @@ import { GraphicalNote } from "./GraphicalNote";
 import { Beam } from "../VoiceData/Beam";
 import { OctaveEnum } from "../VoiceData/Expressions/ContinuousExpressions/OctaveShift";
 import { VoiceEntry, StemDirectionType } from "../VoiceData/VoiceEntry";
-import { OrnamentContainer } from "../VoiceData/OrnamentContainer";
+import { OrnamentContainer, OrnamentEnum } from "../VoiceData/OrnamentContainer";
 import { Articulation } from "../VoiceData/Articulation";
 import { Tuplet } from "../VoiceData/Tuplet";
 import { MusicSystem } from "./MusicSystem";
@@ -38,7 +38,7 @@ import { VerticalGraphicalStaffEntryContainer } from "./VerticalGraphicalStaffEn
 import { KeyInstruction } from "../VoiceData/Instructions/KeyInstruction";
 import { AbstractNotationInstruction } from "../VoiceData/Instructions/AbstractNotationInstruction";
 import { TechnicalInstruction, TechnicalInstructionType } from "../VoiceData/Instructions/TechnicalInstruction";
-import { Pitch } from "../../Common/DataObjects/Pitch";
+import { AccidentalEnum, Pitch } from "../../Common/DataObjects/Pitch";
 import { LinkedVoice } from "../VoiceData/LinkedVoice";
 import { IGraphicalSymbolFactory } from "../Interfaces/IGraphicalSymbolFactory";
 import { ITextMeasurer } from "../Interfaces/ITextMeasurer";
@@ -97,6 +97,13 @@ interface FingeringPxRect {
     y: number;
     width: number;
     height: number;
+}
+
+interface FingeringOrnamentVisualMetrics {
+    width: number;
+    height: number;
+    bottomOffset: number;
+    advanceHeight: number;
 }
 
 interface FingeringPlacementWorkItem {
@@ -3947,6 +3954,81 @@ export abstract class MusicSheetCalculator {
         return delayXShift;
     }
 
+    private getFingeringVexflowOrnamentName(ornamentContainer: OrnamentContainer): string {
+        if (ornamentContainer.VexflowOrnament) {
+            return ornamentContainer.VexflowOrnament;
+        }
+        switch (ornamentContainer.GetOrnament) {
+            case OrnamentEnum.LongTrill:
+            case OrnamentEnum.Trill:
+                return "tr";
+            case OrnamentEnum.DelayedInvertedTurn:
+            case OrnamentEnum.InvertedTurn:
+                return "turn_inverted";
+            case OrnamentEnum.DelayedTurn:
+            case OrnamentEnum.Turn:
+                return "turn";
+            case OrnamentEnum.InvertedMordent:
+                return "mordent";
+            case OrnamentEnum.Mordent:
+                return "mordent_inverted";
+            case OrnamentEnum.LongMordent:
+                return "prallmordent";
+            case OrnamentEnum.LongInvertedMordent:
+                return "tremblement";
+            case OrnamentEnum.UpPrall:
+                return "upprall";
+            case OrnamentEnum.DownPrall:
+                return "downprall";
+            case OrnamentEnum.PrallUp:
+                return "prallup";
+            case OrnamentEnum.PrallDown:
+                return "pralldown";
+            case OrnamentEnum.UpMordent:
+                return "upmordent";
+            case OrnamentEnum.DownMordent:
+                return "downmordent";
+            case OrnamentEnum.LinePrall:
+                return "lineprall";
+            case OrnamentEnum.PrallPrall:
+                return "prallprall";
+            default:
+                return undefined;
+        }
+    }
+
+    private isFingeringDelayedOrnament(ornamentContainer: OrnamentContainer): boolean {
+        return ornamentContainer.GetOrnament === OrnamentEnum.DelayedTurn ||
+            ornamentContainer.GetOrnament === OrnamentEnum.DelayedInvertedTurn;
+    }
+
+    private createFingeringOrnamentEstimateModifier(ornamentContainer: OrnamentContainer, vfNote: any): any {
+        const ornamentName: string = this.getFingeringVexflowOrnamentName(ornamentContainer);
+        if (!ornamentName || !vfNote) {
+            return undefined;
+        }
+        const ornament: any = new VF.Ornament(ornamentName);
+        if (typeof ornament.setDelayed === "function") {
+            ornament.setDelayed(this.isFingeringDelayedOrnament(ornamentContainer));
+        }
+        if (ornamentContainer.AccidentalBelow !== AccidentalEnum.NONE && typeof ornament.setLowerAccidental === "function") {
+            ornament.setLowerAccidental(Pitch.accidentalVexflow(ornamentContainer.AccidentalBelow));
+        }
+        if (ornamentContainer.AccidentalAbove !== AccidentalEnum.NONE && typeof ornament.setUpperAccidental === "function") {
+            ornament.setUpperAccidental(Pitch.accidentalVexflow(ornamentContainer.AccidentalAbove));
+        }
+        const positions: any = this.getFingeringModifierPositions();
+        const position: number = ornamentContainer.placement === PlacementEnum.Below ? positions.BELOW : positions.ABOVE;
+        if (typeof ornament.setPosition === "function") {
+            ornament.setPosition(position);
+        } else {
+            ornament.position = position;
+        }
+        ornament.note = vfNote;
+        ornament.index = 0;
+        return ornament;
+    }
+
     private getFingeringVexFlowGlyphMetrics(glyph: any, owner: any): { width: number, height: number } {
         if (!glyph) {
             return { width: 0, height: 0 };
@@ -3960,18 +4042,31 @@ export abstract class MusicSheetCalculator {
         };
     }
 
-    private getFingeringOrnamentGlyphMetrics(ornament: any): { width: number, height: number } {
+    private getFingeringOrnamentGlyphMetrics(ornament: any): FingeringOrnamentVisualMetrics {
         const glyphMetrics: { width: number, height: number } =
             this.getFingeringVexFlowGlyphMetrics(ornament?.glyph, ornament);
         if (ornament?.ornament?.smuflGlyph) {
             const fontSize: number = Number(ornament.render_options?.font_scale ?? 38) * 0.92 *
                 Number(ornament.ornament?.smuflScale ?? 1);
+            const safeFontSize: number = Number.isFinite(fontSize) ? fontSize : Math.max(glyphMetrics.height, 10);
+            const visualHeight: number = Math.max(
+                safeFontSize * 0.62,
+                Math.min(glyphMetrics.height, safeFontSize) * 0.7,
+                6
+            );
             return {
-                width: Math.max(Number(ornament?.getWidth?.() ?? ornament?.width ?? 0), glyphMetrics.width, fontSize * 0.7),
-                height: Number.isFinite(fontSize) ? fontSize : Math.max(glyphMetrics.height, 10),
+                width: Math.max(Number(ornament?.getWidth?.() ?? ornament?.width ?? 0), glyphMetrics.width, safeFontSize * 0.7),
+                height: visualHeight,
+                bottomOffset: safeFontSize * 0.14,
+                advanceHeight: safeFontSize,
             };
         }
-        return glyphMetrics;
+        return {
+            width: glyphMetrics.width,
+            height: glyphMetrics.height,
+            bottomOffset: 0,
+            advanceHeight: glyphMetrics.height,
+        };
     }
 
     private getFingeringArticulationCollisionRectPx(articulation: any): FingeringPxRect {
@@ -4118,13 +4213,13 @@ export abstract class MusicSheetCalculator {
             glyphY += yShift;
         }
 
-        const ornamentMetrics: { width: number, height: number } = this.getFingeringOrnamentGlyphMetrics(ornament);
+        const ornamentMetrics: FingeringOrnamentVisualMetrics = this.getFingeringOrnamentGlyphMetrics(ornament);
         const lowerMetrics: { width: number, height: number } =
             this.getFingeringVexFlowGlyphMetrics(ornament.accidentalLower, undefined);
         const upperMetrics: { width: number, height: number } =
             this.getFingeringVexFlowGlyphMetrics(ornament.accidentalUpper, undefined);
-        const lowerPadding: number = Number(ornament.render_options?.accidentalLowerPadding ?? 3);
-        const upperPadding: number = Number(ornament.render_options?.accidentalUpperPadding ?? 3);
+        const lowerPadding: number = Math.max(Number(ornament.render_options?.accidentalLowerPadding ?? 3), 0);
+        const upperPadding: number = Math.max(Number(ornament.render_options?.accidentalUpperPadding ?? 3), 0);
         const hasLower: boolean = lowerMetrics.width > 0.01 && lowerMetrics.height > 0.01;
         const hasUpper: boolean = upperMetrics.width > 0.01 && upperMetrics.height > 0.01;
         const width: number = Math.max(
@@ -4134,17 +4229,42 @@ export abstract class MusicSheetCalculator {
             Number(ornament?.getWidth?.() ?? ornament?.width ?? 0),
             5
         );
-        const height: number =
-            (hasLower ? lowerMetrics.height + lowerPadding : 0) +
-            Math.max(ornamentMetrics.height, 5) +
-            (hasUpper ? upperPadding + upperMetrics.height : 0);
+        const x: number = glyphX - width / 2;
+        let cursorY: number = glyphY;
+        let topY: number = Number.POSITIVE_INFINITY;
+        let bottomY: number = Number.NEGATIVE_INFINITY;
+        const includeYBounds: (top: number, bottom: number) => void = (top: number, bottom: number): void => {
+            if (!Number.isFinite(top) || !Number.isFinite(bottom)) {
+                return;
+            }
+            topY = Math.min(topY, top, bottom);
+            bottomY = Math.max(bottomY, top, bottom);
+        };
+
+        if (hasLower) {
+            includeYBounds(cursorY - lowerMetrics.height, cursorY);
+            cursorY -= lowerMetrics.height + lowerPadding;
+        }
+
+        const ornamentBottom: number = cursorY + ornamentMetrics.bottomOffset;
+        includeYBounds(ornamentBottom - Math.max(ornamentMetrics.height, 5), ornamentBottom);
+        cursorY -= Math.max(ornamentMetrics.advanceHeight, ornamentMetrics.height, 5);
+
+        if (hasUpper) {
+            const upperY: number = cursorY - upperPadding;
+            includeYBounds(upperY - upperMetrics.height, upperY);
+        }
+
+        if (!Number.isFinite(topY) || !Number.isFinite(bottomY) || bottomY <= topY) {
+            return undefined;
+        }
 
         return this.normalizeFingeringPxRect({
-            x: glyphX - width / 2,
-            y: glyphY - height,
+            x,
+            y: topY,
             width,
-            height,
-        }, 1.5);
+            height: bottomY - topY,
+        }, ornament?.ornament?.smuflGlyph ? 1 : 1.5);
     }
 
     private addFingeringBeamCollisionRects(rects: FingeringCollisionRect[], measure: GraphicalMeasure,
@@ -4354,6 +4474,109 @@ export abstract class MusicSheetCalculator {
         }
     }
 
+    private getFingeringOrnamentReserveSize(ornamentContainer: OrnamentContainer): { halfWidth: number, height: number } {
+        const ornamentName: string = this.getFingeringVexflowOrnamentName(ornamentContainer);
+        const hasAccidental: boolean =
+            ornamentContainer.AccidentalAbove !== AccidentalEnum.NONE ||
+            ornamentContainer.AccidentalBelow !== AccidentalEnum.NONE;
+        const wideOrnament: boolean = /turn|prall|mordent|tremblement/.test(ornamentName ?? "");
+        const halfWidth: number = wideOrnament ? 1.35 : 1.05;
+        const height: number = (wideOrnament ? 1.8 : 1.45) + (hasAccidental ? 0.85 : 0);
+        return { halfWidth, height };
+    }
+
+    private getFingeringStemLaneExtremeY(vfNote: any, above: boolean): number {
+        const stemExtents: any = this.getFingeringNoteStemExtents(vfNote);
+        const ys: number[] = [Number(stemExtents?.topY), Number(stemExtents?.baseY)];
+        const noteYs: number[] = typeof vfNote?.getYs === "function" ? vfNote.getYs() : [];
+        if (Array.isArray(noteYs)) {
+            ys.push(...noteYs.map((y: number) => Number(y)));
+        }
+        const finiteYs: number[] = ys.filter((y: number) => Number.isFinite(y));
+        if (finiteYs.length === 0) {
+            return undefined;
+        }
+        const staveOrigin: { x: number, y: number } = this.getVexFlowStaveOriginPx(vfNote);
+        const extremeY: number = above ? Math.min(...finiteYs) : Math.max(...finiteYs);
+        return (extremeY - staveOrigin.y) / 10;
+    }
+
+    private adjustFingeringOrnamentReserveToStemLane(rect: FingeringCollisionRect,
+                                                     ornamentContainer: OrnamentContainer,
+                                                     vfNote: any): FingeringCollisionRect {
+        if (!rect) {
+            return rect;
+        }
+        const above: boolean = ornamentContainer.placement !== PlacementEnum.Below;
+        const stemLaneY: number = this.getFingeringStemLaneExtremeY(vfNote, above);
+        if (!Number.isFinite(stemLaneY)) {
+            return rect;
+        }
+        const clearance: number = 0.18;
+        const targetEdge: number = above ? stemLaneY - clearance : stemLaneY + clearance;
+        if ((above && rect.bottom <= targetEdge + 0.03) ||
+            (!above && rect.top >= targetEdge - 0.03)) {
+            return rect;
+        }
+
+        const size: { halfWidth: number, height: number } = this.getFingeringOrnamentReserveSize(ornamentContainer);
+        const centerX: number = (rect.left + rect.right) / 2;
+        const halfWidth: number = Math.max((rect.right - rect.left) / 2, size.halfWidth);
+        const height: number = Math.max(rect.bottom - rect.top, size.height);
+        return {
+            left: centerX - halfWidth,
+            right: centerX + halfWidth,
+            top: above ? targetEdge - height : targetEdge,
+            bottom: above ? targetEdge : targetEdge + height,
+            penalty: rect.penalty,
+            kind: rect.kind
+        };
+    }
+
+    private getFingeringOrnamentReserveRect(voiceEntry: GraphicalVoiceEntry, line: StaffLine,
+                                            measure: GraphicalMeasure): FingeringCollisionRect {
+        const ornamentContainer: OrnamentContainer = voiceEntry.parentVoiceEntry?.OrnamentContainer;
+        const graphicalNote: GraphicalNote = voiceEntry.notes[0];
+        if (!ornamentContainer || !graphicalNote) {
+            return undefined;
+        }
+
+        const vfNote: any = (graphicalNote as any).vfnote?.[0] ?? (voiceEntry as any).vfStaveNote;
+        if (vfNote) {
+            try {
+                const estimate: any = this.createFingeringOrnamentEstimateModifier(ornamentContainer, vfNote);
+                const pxRect: FingeringPxRect = this.getFingeringOrnamentCollisionRectPx(estimate);
+                const staveOrigin: { x: number, y: number } = this.getVexFlowStaveOriginPx(vfNote);
+                const measureX: number = measure.PositionAndShape.RelativePosition.x;
+                const rect: FingeringCollisionRect =
+                    this.fingeringPxRectToCollisionRect(pxRect, measureX, staveOrigin, "ornament-reserve", 1);
+                if (rect) {
+                    return this.adjustFingeringOrnamentReserveToStemLane(rect, ornamentContainer, vfNote);
+                }
+            } catch (e) {
+                // Fall through to the staff-relative estimate when VexFlow geometry is incomplete.
+            }
+        }
+
+        const noteRect: FingeringCollisionRect =
+            this.getBoundingBoxRectInStaffLine(graphicalNote.PositionAndShape, line, true);
+        if (!noteRect) {
+            return undefined;
+        }
+        const centerX: number = (noteRect.left + noteRect.right) / 2;
+        const above: boolean = ornamentContainer.placement !== PlacementEnum.Below;
+        const size: { halfWidth: number, height: number } = this.getFingeringOrnamentReserveSize(ornamentContainer);
+        const stemLaneOffset: number = 3.1;
+        return {
+            left: centerX - size.halfWidth,
+            right: centerX + size.halfWidth,
+            top: above ? noteRect.top - stemLaneOffset - size.height : noteRect.bottom + stemLaneOffset,
+            bottom: above ? noteRect.top - stemLaneOffset : noteRect.bottom + stemLaneOffset + size.height,
+            penalty: 1,
+            kind: "ornament-reserve"
+        };
+    }
+
     private addFingeringOrnamentReserveRects(rects: FingeringCollisionRect[], gse: GraphicalStaffEntry,
                                              line: StaffLine, measure: GraphicalMeasure): void {
         for (let voiceEntryIndex: number = 0; voiceEntryIndex < gse.graphicalVoiceEntries.length; voiceEntryIndex++) {
@@ -4361,22 +4584,12 @@ export abstract class MusicSheetCalculator {
             if (!voiceEntry.parentVoiceEntry?.OrnamentContainer || voiceEntry.notes.length === 0) {
                 continue;
             }
-            const noteRect: FingeringCollisionRect =
-                this.getBoundingBoxRectInStaffLine(voiceEntry.notes[0].PositionAndShape, line, true);
-            if (!noteRect) {
-                continue;
-            }
-            const ornamentPlacement: PlacementEnum = voiceEntry.parentVoiceEntry.OrnamentContainer.placement;
-            const centerX: number = (noteRect.left + noteRect.right) / 2;
-            const above: boolean = ornamentPlacement !== PlacementEnum.Below;
-            this.addRectIfValid(rects, this.withFingeringDebugSource({
-                left: centerX - 0.85,
-                right: centerX + 0.85,
-                top: above ? noteRect.top - 1.3 : noteRect.bottom + 0.15,
-                bottom: above ? noteRect.top - 0.15 : noteRect.bottom + 1.3,
-                penalty: 0.7,
-                kind: "ornament-reserve"
-            }, measure, line, `ornament-reserve:${voiceEntryIndex}`));
+            this.addRectIfValid(rects, this.withFingeringDebugSource(
+                this.getFingeringOrnamentReserveRect(voiceEntry, line, measure),
+                measure,
+                line,
+                `ornament-reserve:${voiceEntryIndex}`
+            ));
         }
     }
 
@@ -4497,6 +4710,58 @@ export abstract class MusicSheetCalculator {
         return offsets;
     }
 
+    private isFingeringOrnamentCollisionKind(kind: string): boolean {
+        return kind === "ornament" || kind === "ornament-reserve";
+    }
+
+    private getFingeringCollisionClearancePadding(kind: string): number {
+        return this.isFingeringOrnamentCollisionKind(kind) ? 0.18 : 0.035;
+    }
+
+    private getFingeringVerticalSearchOffsetsForCollisions(items: FingeringPlacementWorkItem[],
+                                                           placement: PlacementEnum,
+                                                           collisionRects: FingeringCollisionRect[]): number[] {
+        const offsets: number[] = this.getFingeringVerticalSearchOffsets(items, placement);
+        const maxTargetedShift: number = 9.2;
+        for (const item of items) {
+            for (const collisionRect of collisionRects) {
+                const kind: string = collisionRect.kind ?? "unknown";
+                if (!this.isFingeringOrnamentCollisionKind(kind)) {
+                    continue;
+                }
+                const padding: number = this.getFingeringCollisionClearancePadding(kind);
+                const horizontalOverlap: number =
+                    Math.min(item.initialRect.right, collisionRect.right) + padding -
+                    (Math.max(item.initialRect.left, collisionRect.left) - padding);
+                if (horizontalOverlap <= 0) {
+                    continue;
+                }
+                const targetDy: number = placement === PlacementEnum.Above
+                    ? collisionRect.top - item.initialRect.bottom - padding * 2
+                    : collisionRect.bottom - item.initialRect.top + padding * 2;
+                if ((placement === PlacementEnum.Above && targetDy >= -0.0001) ||
+                    (placement === PlacementEnum.Below && targetDy <= 0.0001) ||
+                    Math.abs(targetDy) > maxTargetedShift) {
+                    continue;
+                }
+                const outwardSign: number = placement === PlacementEnum.Above ? -1 : 1;
+                offsets.push(targetDy, targetDy + outwardSign * 0.04, targetDy + outwardSign * 0.12);
+            }
+        }
+        const uniqueOffsets: number[] = [];
+        const seen: Set<string> = new Set<string>();
+        for (const offset of offsets) {
+            const key: string = offset.toFixed(3);
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            uniqueOffsets.push(offset);
+        }
+        return uniqueOffsets.sort((left: number, right: number) =>
+            Math.abs(left) - Math.abs(right) || left - right);
+    }
+
     private getFingeringCollisionKindWeight(kind: string, stacked: boolean): number {
         switch (kind) {
             case "existing-fingering":
@@ -4514,11 +4779,11 @@ export abstract class MusicSheetCalculator {
             case "beam":
                 return stacked ? 3 : 8;
             case "ornament":
-                return 20;
+                return 130;
             case "articulation":
                 return 18;
             case "ornament-reserve":
-                return 14;
+                return 115;
             case "tie":
                 return 12;
             default:
@@ -4529,19 +4794,22 @@ export abstract class MusicSheetCalculator {
     private getFingeringCollisionCost(rect: FingeringCollisionRect,
                                       collisionRects: FingeringCollisionRect[],
                                       stacked: boolean): number {
-        const labelRect: FingeringCollisionRect = this.expandFingeringRect(rect, 0.035);
         let cost: number = 0;
         for (const collisionRect of collisionRects) {
-            const obstacleRect: FingeringCollisionRect = this.expandFingeringRect(collisionRect, 0.035);
+            const kind: string = collisionRect.kind ?? "unknown";
+            const padding: number = this.getFingeringCollisionClearancePadding(kind);
+            const labelRect: FingeringCollisionRect = this.expandFingeringRect(rect, padding);
+            const obstacleRect: FingeringCollisionRect = this.expandFingeringRect(collisionRect, padding);
             const paddedOverlap: number = this.getRectOverlapArea(labelRect, obstacleRect);
             if (paddedOverlap <= 0) {
                 continue;
             }
             const actualOverlap: number = this.getRectOverlapArea(rect, collisionRect);
-            const kindWeight: number = this.getFingeringCollisionKindWeight(collisionRect.kind ?? "unknown", stacked);
+            const kindWeight: number = this.getFingeringCollisionKindWeight(kind, stacked);
             const rectPenalty: number = collisionRect.penalty ?? 1;
             const softFactor: number = collisionRect.soft ? 0.45 : 1;
-            cost += (actualOverlap * 120 + paddedOverlap * 16) * kindWeight * rectPenalty * softFactor;
+            const clearanceFactor: number = this.isFingeringOrnamentCollisionKind(kind) ? 95 : 16;
+            cost += (actualOverlap * 120 + paddedOverlap * clearanceFactor) * kindWeight * rectPenalty * softFactor;
         }
         return cost;
     }
@@ -4629,7 +4897,7 @@ export abstract class MusicSheetCalculator {
         const relevantCollisionRects: FingeringCollisionRect[] =
             this.getRelevantFingeringGroupCollisionRects(items, collisionRects, horizontalSearchRadius);
         let bestResolution: FingeringGroupResolution;
-        for (const dy of this.getFingeringVerticalSearchOffsets(items, placement)) {
+        for (const dy of this.getFingeringVerticalSearchOffsetsForCollisions(items, placement, relevantCollisionRects)) {
             const candidates: FingeringLabelCandidate[] = items.map((item: FingeringPlacementWorkItem) =>
                 this.getBestFingeringLabelCandidate(item, dy, relevantCollisionRects, stacked, measure, line));
             const collisionCost: number = candidates.reduce(

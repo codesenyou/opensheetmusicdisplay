@@ -1207,10 +1207,12 @@ export class MusicSystemBuilder {
                     + this.rules.MinimumStaffLineDistance
                     + this.rules.MinSkyBottomDistBetweenStaves
                     + 2.0;
-                const sameInstrumentDistanceCap: number = this.rules.StaffHeight
+                const sameInstrumentDistanceFloor: number = this.rules.StaffHeight
+                    + Math.max(this.rules.MinimumStaffLineDistance, this.rules.BetweenStaffDistance);
+                const sameInstrumentDistanceCap: number = Math.max(sameInstrumentDistanceFloor, this.rules.StaffHeight
                     + this.rules.MinimumStaffLineDistance
                     + this.rules.MinSkyBottomDistBetweenStaves
-                    + 2.0;
+                    + 2.0);
                 // 1. Find maximum required space for sky bottom line touching each other
                 let maxDistance: number = 0;
                 for (let j: number = 0; j < upperBottomLine.length; j++) {
@@ -1244,7 +1246,9 @@ export class MusicSystemBuilder {
                 // 2. Add user defined distance between sky bottom line
                 maxDistance += this.rules.MinSkyBottomDistBetweenStaves;
                 // 3. Take the maximum between previous value and user defined value for staff line minimum distance
-                maxDistance = Math.max(maxDistance, this.rules.StaffHeight + this.rules.MinimumStaffLineDistance);
+                maxDistance = Math.max(maxDistance, sameInstrumentPair
+                    ? sameInstrumentDistanceFloor
+                    : this.rules.StaffHeight + this.rules.MinimumStaffLineDistance);
                 // 4. For grand staff pairs, prevent beam/stem outliers from exploding staff distance.
                 if (sameInstrumentPair) {
                     maxDistance = Math.min(maxDistance, sameInstrumentDistanceCap);

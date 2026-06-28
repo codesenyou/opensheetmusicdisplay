@@ -56,6 +56,28 @@ interface StemCollisionSample {
     staveNote: any;
 }
 
+interface StemCollisionCandidate {
+    rect: CollisionRect;
+    staveNote: any;
+}
+
+interface OrnamentCollisionTarget {
+    ornament: any;
+    note: any;
+}
+
+interface VexFlowElementCollisionRect {
+    rect: CollisionRect;
+    label?: string;
+}
+
+interface OrnamentVisualMetrics {
+    width: number;
+    height: number;
+    bottomOffset: number;
+    advanceHeight: number;
+}
+
 interface RestPlacementObstacle {
     rect: CollisionRect;
     kind: CollisionBoxKind;
@@ -163,6 +185,8 @@ export class VexFlowMeasure extends GraphicalMeasure {
     private tieCollisionBaselines: WeakMap<VF.StaveTie, TieCollisionBaseline> = new WeakMap();
     /** Original VexFlow beam/stem options, so collision optimization stays idempotent across repeated draws. */
     private beamCollisionBaselines: WeakMap<VF.Beam, BeamCollisionBaseline> = new WeakMap();
+    /** Original VexFlow ornament shifts, so stem-collision optimization stays idempotent across repeated draws. */
+    private ornamentCollisionBaselines: WeakMap<Object, number> = new WeakMap();
     /** Whether a beam was auto-stemmed and may be flipped by the measure-wide collision optimizer. */
     private beamStemFlipAllowed: WeakMap<VF.Beam, boolean> = new WeakMap();
     // The engraving rules of OSMD.
@@ -730,6 +754,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
         this.registerStaveModifierCollisionBoxes();
         this.optimizeBeamStemDirectionCombinations();
         this.optimizeRestTickablePlacement();
+        this.optimizeOrnamentStemCollision();
         // Draw all voices
         for (const voiceID in this.vfVoices) {
             if (this.vfVoices.hasOwnProperty(voiceID)) {
@@ -742,7 +767,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
         }
         const noteheadSamples: NoteheadCollisionSample[] = this.collectNoteheadCollisionSamples();
         const stemSamples: StemCollisionSample[] = this.collectStemCollisionSamples();
-        this.registerVoiceCollisionBoxes(noteheadSamples, stemSamples);
+        this.registerVoiceCollisionBoxes(noteheadSamples, []);
         // Draw beams
         for (const voiceID in this.vfbeams) {
             if (this.vfbeams.hasOwnProperty(voiceID)) {
@@ -795,6 +820,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 }
             }
         }
+        this.registerStemCollisionBoxes(this.collectStemCollisionSamples());
 
         // Draw ties
         for (const tie of this.vfTies) {
@@ -1977,14 +2003,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 height: sample.radius * 2,
             }), CollisionBoxKind.Notehead, sample.staveNote, sample.staveNote);
         }
-        for (const sample of stemSamples) {
-            collisionModel.registerRect(this.rectPxToUnit({
-                x: sample.x - Math.max(this.rules.StemWidth * unitInPixels, 1) / 2,
-                y: sample.topY,
-                width: Math.max(this.rules.StemWidth * unitInPixels, 1),
-                height: sample.bottomY - sample.topY,
-            }), CollisionBoxKind.Stem, sample.staveNote, sample.staveNote);
-        }
+        this.registerStemCollisionBoxes(stemSamples);
         const tickables: any[] = this.getAllTickables();
         for (const tickable of tickables) {
             this.registerVexFlowElementCollisionBox(tickable, this.classifyVexFlowElement(tickable));
@@ -1998,6 +2017,142 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 this.registerVexFlowElementCollisionBox(modifier, this.classifyVexFlowElement(modifier));
             }
         }
+    }
+
+    private registerStemCollisionBoxes(stemSamples: StemCollisionSample[]): void {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel) {
+            return;
+        }
+        for (const sample of stemSamples) {
+            collisionModel.registerRect(this.rectPxToUnit({
+                x: sample.x - Math.max(this.rules.StemWidth * unitInPixels, 1) / 2,
+                y: sample.topY,
+                width: Math.max(this.rules.StemWidth * unitInPixels, 1),
+                height: sample.bottomY - sample.topY,
+            }), CollisionBoxKind.Stem, sample.staveNote, sample.staveNote);
+        }
+    }
+
+    private optimizeOrnamentStemCollision(): void {
+        const ornamentTargets: OrnamentCollisionTarget[] = this.collectOrnamentCollisionTargets();
+        if (ornamentTargets.length === 0) {
+            return;
+        }
+
+        const stemObstacles: RestPlacementObstacle[] = this.getOrnamentStemCollisionObstacles();
+        if (stemObstacles.length === 0) {
+            return;
+        }
+
+        const model: CollisionModel = this.createOrnamentStemCollisionModel(stemObstacles);
+        for (const target of ornamentTargets) {
+            const baselineYShift: number = this.getOrnamentCollisionBaselineYShift(target.ornament);
+            target.ornament.y_shift = baselineYShift;
+            const baseRect: CollisionRect = this.getOrnamentCollisionRectPx(target.ornament);
+            if (!CollisionModel.isUsableRect(baseRect)) {
+                continue;
+            }
+            if (!model.collides(baseRect)) {
+                continue;
+            }
+
+            const resolvedYShift: number = this.findOrnamentStemCollisionYShift(model, target, baseRect);
+            target.ornament.y_shift = baselineYShift + resolvedYShift;
+        }
+    }
+
+    private collectOrnamentCollisionTargets(): OrnamentCollisionTarget[] {
+        const targets: OrnamentCollisionTarget[] = [];
+        const seen: Set<any> = new Set<any>();
+        for (const tickable of this.getAllTickables()) {
+            const modifiers: any[] = typeof tickable?.getModifiers === "function" ? tickable.getModifiers() : tickable?.modifiers;
+            if (!Array.isArray(modifiers)) {
+                continue;
+            }
+            for (const modifier of modifiers) {
+                if (!modifier || seen.has(modifier) || this.getVexFlowElementCategory(modifier).indexOf("ornament") < 0) {
+                    continue;
+                }
+                const note: any = typeof modifier.getNote === "function" ? modifier.getNote() : modifier.note ?? tickable;
+                if (!note) {
+                    continue;
+                }
+                seen.add(modifier);
+                targets.push({
+                    ornament: modifier,
+                    note,
+                });
+            }
+        }
+        return targets;
+    }
+
+    private getOrnamentCollisionBaselineYShift(ornament: any): number {
+        const existingBaseline: number = this.ornamentCollisionBaselines.get(ornament as Object);
+        if (existingBaseline !== undefined) {
+            return existingBaseline;
+        }
+
+        const yShift: number = Number(ornament?.y_shift ?? 0);
+        const baseline: number = Number.isFinite(yShift) ? yShift : 0;
+        this.ornamentCollisionBaselines.set(ornament as Object, baseline);
+        return baseline;
+    }
+
+    private getOrnamentStemCollisionObstacles(): RestPlacementObstacle[] {
+        const stemWidth: number = Math.max(this.rules.StemWidth * unitInPixels, 1);
+        const horizontalPadding: number = Math.max(1.2, stemWidth * 0.75);
+        const verticalPadding: number = 0.75;
+        const obstacles: RestPlacementObstacle[] = [];
+        for (const sample of this.collectStemCollisionSamples()) {
+            obstacles.push({
+                rect: {
+                    x: sample.x - stemWidth / 2 - horizontalPadding,
+                    y: sample.topY - verticalPadding,
+                    width: stemWidth + horizontalPadding * 2,
+                    height: sample.bottomY - sample.topY + verticalPadding * 2,
+                },
+                kind: CollisionBoxKind.Stem,
+                owner: sample.staveNote,
+            });
+        }
+        return obstacles.filter((obstacle: RestPlacementObstacle) => CollisionModel.isUsableRect(obstacle.rect));
+    }
+
+    private createOrnamentStemCollisionModel(obstacles: RestPlacementObstacle[]): CollisionModel {
+        const model: CollisionModel = new CollisionModel();
+        for (const obstacle of obstacles) {
+            model.registerRect(obstacle.rect, obstacle.kind, obstacle.owner, obstacle.owner);
+        }
+        return model;
+    }
+
+    private findOrnamentStemCollisionYShift(model: CollisionModel, target: OrnamentCollisionTarget,
+                                            baseRect: CollisionRect): number {
+        const direction: number = this.getOrnamentCollisionNudgeDirection(target.ornament);
+        const stave: any = typeof target.note?.getStave === "function" ? target.note.getStave() : target.note?.stave;
+        const spacing: number = Number(stave?.getSpacingBetweenLines?.() ?? unitInPixels);
+        const staffSpace: number = Number.isFinite(spacing) ? spacing : unitInPixels;
+        const step: number = Math.max(1, Math.min(2, staffSpace * 0.2));
+        const maxShift: number = Math.max(6, staffSpace * 1.2);
+        for (let distance: number = step; distance <= maxShift + 0.0001; distance += step) {
+            const yShift: number = direction * distance;
+            const candidate: CollisionRect = {
+                ...baseRect,
+                y: baseRect.y + yShift,
+            };
+            if (!model.collides(candidate)) {
+                return yShift;
+            }
+        }
+        return direction * maxShift;
+    }
+
+    private getOrnamentCollisionNudgeDirection(ornament: any): number {
+        const positions: any = this.getVexFlowModifierPositions();
+        const position: number = this.getVexFlowModifierPosition(ornament);
+        return position === positions.BELOW ? 1 : -1;
     }
 
     private optimizeRestTickablePlacement(): void {
@@ -2558,19 +2713,56 @@ export class VexFlowMeasure extends GraphicalMeasure {
 
     private registerVexFlowElementCollisionBox(element: any, kind: CollisionBoxKind): boolean {
         const collisionModel: CollisionModel = this.getCollisionModel();
-        const rect: CollisionRect = this.getVexFlowElementRect(element);
-        if (!collisionModel || !rect) {
+        const collisionRect: VexFlowElementCollisionRect = this.getVexFlowElementCollisionRect(element, kind);
+        if (!collisionModel || !collisionRect?.rect) {
             return false;
         }
-        return collisionModel.registerRect(this.rectPxToUnit(rect), kind, element, element) !== undefined;
+        return collisionModel.registerRect(
+            this.rectPxToUnit(collisionRect.rect),
+            kind,
+            element,
+            element,
+            false,
+            0,
+            collisionRect.label
+        ) !== undefined;
     }
 
     private getVexFlowElementRect(element: any): CollisionRect {
+        return this.getVexFlowElementCollisionRect(element)?.rect;
+    }
+
+    private getVexFlowElementCollisionRect(element: any, kind?: CollisionBoxKind): VexFlowElementCollisionRect {
+        const category: string = this.getVexFlowElementCategory(element);
+        const rawRect: CollisionRect = this.getRawVexFlowElementRect(element);
+        if (kind === CollisionBoxKind.Ornament || category === "ornaments") {
+            const ornamentRect: CollisionRect = this.getOrnamentCollisionRectPx(element);
+            if (CollisionModel.isUsableRect(ornamentRect)) {
+                return {
+                    rect: ornamentRect,
+                    label: this.getOrnamentCollisionSourceLabel(ornamentRect, rawRect),
+                };
+            }
+            if (CollisionModel.isUsableRect(rawRect)) {
+                return { rect: rawRect, label: "vexflow-bbox:ornament-fallback" };
+            }
+            return undefined;
+        }
+        if (CollisionModel.isUsableRect(rawRect)) {
+            return { rect: rawRect, label: "vexflow-bbox" };
+        }
+        const fallbackRect: CollisionRect = this.getVexFlowAttachedModifierFallbackRect(element);
+        return CollisionModel.isUsableRect(fallbackRect)
+            ? { rect: fallbackRect, label: "attached-modifier-fallback" }
+            : undefined;
+    }
+
+    private getRawVexFlowElementRect(element: any): CollisionRect {
         let box: any;
         try {
             box = typeof element?.getBoundingBox === "function" ? element.getBoundingBox() : element?.boundingBox;
         } catch (e) {
-            return this.getVexFlowAttachedModifierFallbackRect(element);
+            return undefined;
         }
         if (box) {
             const x: number = typeof box.getX === "function" ? box.getX() : box.x;
@@ -2582,7 +2774,18 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 return { x, y, width, height };
             }
         }
-        return this.getVexFlowAttachedModifierFallbackRect(element);
+        return undefined;
+    }
+
+    private getOrnamentCollisionSourceLabel(ornamentRect: CollisionRect, rawRect: CollisionRect): string {
+        if (!CollisionModel.isUsableRect(rawRect)) {
+            return "ornament-estimate:no-vexflow-bbox";
+        }
+        const heightRatio: number = rawRect.height / Math.max(ornamentRect.height, 0.01);
+        if (heightRatio > 1.25) {
+            return `ornament-estimate:raw-bbox-height-${heightRatio.toFixed(2)}x`;
+        }
+        return "ornament-estimate";
     }
 
     private registerRepeatDotCollisionBoxes(barline: any): void {
@@ -3018,11 +3221,11 @@ export class VexFlowMeasure extends GraphicalMeasure {
             glyphY += yShift;
         }
 
-        const ornamentMetrics: { width: number, height: number } = this.getOrnamentGlyphMetrics(ornament);
+        const ornamentMetrics: OrnamentVisualMetrics = this.getOrnamentGlyphMetrics(ornament);
         const lowerMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(ornament.accidentalLower, undefined);
         const upperMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(ornament.accidentalUpper, undefined);
-        const lowerPadding: number = Number(ornament.render_options?.accidentalLowerPadding ?? 3);
-        const upperPadding: number = Number(ornament.render_options?.accidentalUpperPadding ?? 3);
+        const lowerPadding: number = Math.max(Number(ornament.render_options?.accidentalLowerPadding ?? 3), 0);
+        const upperPadding: number = Math.max(Number(ornament.render_options?.accidentalUpperPadding ?? 3), 0);
         const hasLower: boolean = lowerMetrics.width > 0.01 && lowerMetrics.height > 0.01;
         const hasUpper: boolean = upperMetrics.width > 0.01 && upperMetrics.height > 0.01;
         const width: number = Math.max(
@@ -3032,17 +3235,42 @@ export class VexFlowMeasure extends GraphicalMeasure {
             Number(ornament?.getWidth?.() ?? ornament?.width ?? 0),
             5
         );
-        const height: number =
-            (hasLower ? lowerMetrics.height + lowerPadding : 0) +
-            Math.max(ornamentMetrics.height, 5) +
-            (hasUpper ? upperPadding + upperMetrics.height : 0);
+        const x: number = glyphX - width / 2;
+        let cursorY: number = glyphY;
+        let topY: number = Number.POSITIVE_INFINITY;
+        let bottomY: number = Number.NEGATIVE_INFINITY;
+        const includeYBounds: (top: number, bottom: number) => void = (top: number, bottom: number): void => {
+            if (!Number.isFinite(top) || !Number.isFinite(bottom)) {
+                return;
+            }
+            topY = Math.min(topY, top, bottom);
+            bottomY = Math.max(bottomY, top, bottom);
+        };
+
+        if (hasLower) {
+            includeYBounds(cursorY - lowerMetrics.height, cursorY);
+            cursorY -= lowerMetrics.height + lowerPadding;
+        }
+
+        const ornamentBottom: number = cursorY + ornamentMetrics.bottomOffset;
+        includeYBounds(ornamentBottom - Math.max(ornamentMetrics.height, 5), ornamentBottom);
+        cursorY -= Math.max(ornamentMetrics.advanceHeight, ornamentMetrics.height, 5);
+
+        if (hasUpper) {
+            const upperY: number = cursorY - upperPadding;
+            includeYBounds(upperY - upperMetrics.height, upperY);
+        }
+
+        if (!Number.isFinite(topY) || !Number.isFinite(bottomY) || bottomY <= topY) {
+            return undefined;
+        }
 
         return this.normalizePxRect({
-            x: glyphX - width / 2,
-            y: glyphY - height,
+            x,
+            y: topY,
             width,
-            height,
-        }, 1.5);
+            height: bottomY - topY,
+        }, ornament?.ornament?.smuflGlyph ? 1 : 1.5);
     }
 
     private getVexFlowModifierPositions(): any {
@@ -3195,17 +3423,30 @@ export class VexFlowMeasure extends GraphicalMeasure {
         };
     }
 
-    private getOrnamentGlyphMetrics(ornament: any): { width: number, height: number } {
+    private getOrnamentGlyphMetrics(ornament: any): OrnamentVisualMetrics {
         const glyphMetrics: { width: number, height: number } = this.getVexFlowGlyphMetrics(ornament?.glyph, ornament);
         if (ornament?.ornament?.smuflGlyph) {
             const fontSize: number = Number(ornament.render_options?.font_scale ?? 38) * 0.92 *
                 Number(ornament.ornament?.smuflScale ?? 1);
+            const safeFontSize: number = Number.isFinite(fontSize) ? fontSize : Math.max(glyphMetrics.height, 10);
+            const visualHeight: number = Math.max(
+                safeFontSize * 0.62,
+                Math.min(glyphMetrics.height, safeFontSize) * 0.7,
+                6
+            );
             return {
-                width: Math.max(Number(ornament?.getWidth?.() ?? ornament?.width ?? 0), glyphMetrics.width, fontSize * 0.7),
-                height: Number.isFinite(fontSize) ? fontSize : Math.max(glyphMetrics.height, 10),
+                width: Math.max(Number(ornament?.getWidth?.() ?? ornament?.width ?? 0), glyphMetrics.width, safeFontSize * 0.7),
+                height: visualHeight,
+                bottomOffset: safeFontSize * 0.14,
+                advanceHeight: safeFontSize,
             };
         }
-        return glyphMetrics;
+        return {
+            width: glyphMetrics.width,
+            height: glyphMetrics.height,
+            bottomOffset: 0,
+            advanceHeight: glyphMetrics.height,
+        };
     }
 
     private normalizePxRect(rect: CollisionRect, padding: number = 0): CollisionRect {
@@ -4185,10 +4426,15 @@ export class VexFlowMeasure extends GraphicalMeasure {
         this.applyBeamCollisionOffset(beam, baseline, 0);
 
         let bestOffset: number = 0;
-        let bestScore: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, stemSamples, 0);
-        for (const extensionOffset of [2, 4, 6, 8, 10, 12]) {
+        let bestScore: number = Number.POSITIVE_INFINITY;
+        for (const extensionOffset of [-8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12]) {
             const score: number = this.scoreBeamOverlap(beam, baseline, noteheadSamples, stemSamples, extensionOffset);
-            if (score < bestScore) {
+            const scoreImproved: boolean = score < bestScore - 0.001;
+            const scoreTied: boolean = Math.abs(score - bestScore) <= 0.001;
+            const offsetIsSmaller: boolean = Math.abs(extensionOffset) < Math.abs(bestOffset);
+            const offsetIsLessInvasive: boolean = Math.abs(extensionOffset) === Math.abs(bestOffset) &&
+                extensionOffset > bestOffset;
+            if (scoreImproved || (scoreTied && (offsetIsSmaller || offsetIsLessInvasive))) {
                 bestScore = score;
                 bestOffset = extensionOffset;
             }
@@ -4244,28 +4490,30 @@ export class VexFlowMeasure extends GraphicalMeasure {
         if (!beam.notes?.length) {
             return 0;
         }
+        this.applyBeamCollisionOffset(beam, baseline, extensionOffset);
         const beamNotes: Set<any> = new Set<any>(beam.notes);
         const stemXs: number[] = beam.notes.map((note: any) => note?.getStemX?.()).filter((x: number) => Number.isFinite(x));
         if (stemXs.length < 2) {
-            return extensionOffset;
+            return Math.abs(extensionOffset);
         }
         const minX: number = Math.min(...stemXs) - 2;
         const maxX: number = Math.max(...stemXs) + 2;
         const beamThickness: number = (beam.render_options?.beam_width ?? 5) * baseline.stemDirection;
-        const beamBandMultiplier: number = ((beam.beam_count - 1) * 1.5) + 1;
+        const beamBandMultiplier: number = (((beam.beam_count ?? 1) - 1) * 1.5) + 1;
         const beamBandHeight: number = beamThickness * beamBandMultiplier;
 
         const firstNote: any = beam.notes[0];
         const firstStemX: number = firstNote.getStemX();
-        const baseBeamY: number = beam.getBeamYToDraw();
-        const shiftedBeamY: number = baseBeamY + (-baseline.stemDirection * extensionOffset);
-        let score: number = extensionOffset * 0.6; // prefer shorter stems unless needed.
+        const beamY: number = beam.getBeamYToDraw();
+        let score: number = Math.abs(extensionOffset) * (extensionOffset < 0 ? 1.05 : 0.65);
+        const candidateStems: StemCollisionCandidate[] = this.getBeamStemCollisionCandidates(beam);
+        score += this.scoreBeamStemLengthSafety(candidateStems);
 
         for (const sample of noteheadSamples) {
-            if (sample.x < minX || sample.x > maxX || beamNotes.has(sample.staveNote)) {
+            if (sample.x < minX || sample.x > maxX) {
                 continue;
             }
-            const beamLineY: number = beam.getSlopeY(sample.x, firstStemX, shiftedBeamY, beam.slope);
+            const beamLineY: number = beam.getSlopeY(sample.x, firstStemX, beamY, beam.slope);
             if (!Number.isFinite(beamLineY)) {
                 continue;
             }
@@ -4274,21 +4522,24 @@ export class VexFlowMeasure extends GraphicalMeasure {
             const noteMin: number = sample.y - sample.radius;
             const noteMax: number = sample.y + sample.radius;
             const intersects: boolean = noteMax >= bandMin && noteMin <= bandMax;
+            const sameBeamNote: boolean = beamNotes.has(sample.staveNote);
             if (intersects) {
-                score += 25;
+                score += sameBeamNote ? 12000 : 40;
                 continue;
             }
             const distanceToBand: number = sample.y < bandMin ? bandMin - sample.y : sample.y - bandMax;
-            const comfortZone: number = sample.radius + 2;
+            const comfortZone: number = sample.radius + (sameBeamNote ? 4 : 2);
             if (distanceToBand < comfortZone) {
-                score += (comfortZone - distanceToBand) * 4;
+                score += (comfortZone - distanceToBand) * (sameBeamNote ? 90 : 4);
             }
         }
-        for (const sample of stemSamples) {
+        const activeStemSamples: StemCollisionSample[] = this.collectStemCollisionSamples();
+        const scoredStemSamples: StemCollisionSample[] = activeStemSamples.length > 0 ? activeStemSamples : stemSamples;
+        for (const sample of scoredStemSamples) {
             if (sample.x < minX || sample.x > maxX || beamNotes.has(sample.staveNote)) {
                 continue;
             }
-            const beamLineY: number = beam.getSlopeY(sample.x, firstStemX, shiftedBeamY, beam.slope);
+            const beamLineY: number = beam.getSlopeY(sample.x, firstStemX, beamY, beam.slope);
             if (!Number.isFinite(beamLineY)) {
                 continue;
             }
@@ -4296,7 +4547,7 @@ export class VexFlowMeasure extends GraphicalMeasure {
             const bandMax: number = Math.max(beamLineY, beamLineY + beamBandHeight) + 0.7;
             const intersectsStem: boolean = sample.bottomY >= bandMin && sample.topY <= bandMax;
             if (intersectsStem) {
-                score += 18;
+                score += 24;
                 continue;
             }
             const distanceToStem: number = sample.bottomY < bandMin ? bandMin - sample.bottomY : sample.topY - bandMax;
@@ -4304,7 +4555,155 @@ export class VexFlowMeasure extends GraphicalMeasure {
                 score += (2.5 - distanceToStem) * 3;
             }
         }
+        score += this.scoreCandidateStemNoteheadCollisions(candidateStems, noteheadSamples, beamNotes);
+        score += this.scoreCandidateStemStemCollisions(candidateStems, scoredStemSamples, beamNotes);
+        score += this.scoreCandidateStemRegisteredCollisions(candidateStems, beamNotes);
         return score;
+    }
+
+    private getBeamStemCollisionCandidates(beam: any): StemCollisionCandidate[] {
+        const candidates: StemCollisionCandidate[] = [];
+        const stemWidth: number = this.getStemCollisionWidthPx();
+        for (const note of beam.notes ?? []) {
+            if (!note || typeof note.getStemX !== "function" || typeof note.getStemExtents !== "function") {
+                continue;
+            }
+            if (typeof note.isRest === "function" && note.isRest()) {
+                continue;
+            }
+            const x: number = note.getStemX();
+            const extents: any = note.getStemExtents();
+            const topY: number = extents?.topY;
+            const baseY: number = extents?.baseY;
+            if (!Number.isFinite(x) || !Number.isFinite(topY) || !Number.isFinite(baseY)) {
+                continue;
+            }
+            const rect: CollisionRect = {
+                x: x - stemWidth / 2,
+                y: Math.min(topY, baseY),
+                width: stemWidth,
+                height: Math.abs(baseY - topY),
+            };
+            if (CollisionModel.isUsableRect(rect)) {
+                candidates.push({ rect, staveNote: note });
+            }
+        }
+        return candidates;
+    }
+
+    private scoreBeamStemLengthSafety(candidateStems: StemCollisionCandidate[]): number {
+        const minStemLength: number = Math.max(18, this.rules.StemMinLength * unitInPixels * 0.85);
+        let score: number = 0;
+        for (const candidate of candidateStems) {
+            if (candidate.rect.height < minStemLength) {
+                score += 20000 + (minStemLength - candidate.rect.height) * 500;
+            }
+        }
+        return score;
+    }
+
+    private scoreCandidateStemNoteheadCollisions(candidateStems: StemCollisionCandidate[],
+                                                noteheadSamples: NoteheadCollisionSample[],
+                                                beamNotes: Set<any>): number {
+        let score: number = 0;
+        for (const candidate of candidateStems) {
+            for (const sample of noteheadSamples) {
+                if (beamNotes.has(sample.staveNote) || sample.staveNote === candidate.staveNote) {
+                    continue;
+                }
+                const noteheadRect: CollisionRect = {
+                    x: sample.x - sample.radius,
+                    y: sample.y - sample.radius,
+                    width: sample.radius * 2,
+                    height: sample.radius * 2,
+                };
+                if (!CollisionModel.rectsOverlap(candidate.rect, noteheadRect)) {
+                    continue;
+                }
+                score += 1000 + this.getRectOverlapArea(candidate.rect, noteheadRect) * 30;
+            }
+        }
+        return score;
+    }
+
+    private scoreCandidateStemStemCollisions(candidateStems: StemCollisionCandidate[],
+                                            stemSamples: StemCollisionSample[],
+                                            beamNotes: Set<any>): number {
+        const stemWidth: number = this.getStemCollisionWidthPx();
+        let score: number = 0;
+        for (const candidate of candidateStems) {
+            for (const sample of stemSamples) {
+                if (beamNotes.has(sample.staveNote) || sample.staveNote === candidate.staveNote) {
+                    continue;
+                }
+                const stemRect: CollisionRect = {
+                    x: sample.x - stemWidth / 2,
+                    y: sample.topY,
+                    width: stemWidth,
+                    height: sample.bottomY - sample.topY,
+                };
+                if (!CollisionModel.rectsOverlap(candidate.rect, stemRect)) {
+                    continue;
+                }
+                score += 80 + this.getRectOverlapArea(candidate.rect, stemRect) * 8;
+            }
+        }
+        return score;
+    }
+
+    private scoreCandidateStemRegisteredCollisions(candidateStems: StemCollisionCandidate[], beamNotes: Set<any>): number {
+        const collisionModel: CollisionModel = this.getCollisionModel();
+        if (!collisionModel) {
+            return 0;
+        }
+        let score: number = 0;
+        for (const box of collisionModel.Boxes) {
+            const weight: number = this.getStemShorteningCollisionWeight(box.kind);
+            if (weight <= 0 || this.collisionBoxBelongsToAny(box, beamNotes)) {
+                continue;
+            }
+            const boxRect: CollisionRect = this.rectUnitToPx(box.rect);
+            if (!CollisionModel.isUsableRect(boxRect)) {
+                continue;
+            }
+            for (const candidate of candidateStems) {
+                if (box.owner === candidate.staveNote || box.source === candidate.staveNote ||
+                    !CollisionModel.rectsOverlap(candidate.rect, boxRect)) {
+                    continue;
+                }
+                score += weight + this.getRectOverlapArea(candidate.rect, boxRect) * Math.max(4, weight / 40);
+            }
+        }
+        return score;
+    }
+
+    private getStemShorteningCollisionWeight(kind: CollisionBoxKind): number {
+        switch (kind) {
+            case CollisionBoxKind.Beam:
+                return 650;
+            case CollisionBoxKind.Rest:
+            case CollisionBoxKind.Ornament:
+                return 300;
+            case CollisionBoxKind.Fingering:
+            case CollisionBoxKind.Flag:
+                return 220;
+            case CollisionBoxKind.Accidental:
+            case CollisionBoxKind.Articulation:
+                return 160;
+            case CollisionBoxKind.Dot:
+            case CollisionBoxKind.Tuplet:
+                return 100;
+            default:
+                return 0;
+        }
+    }
+
+    private collisionBoxBelongsToAny(box: CollisionBox, owners: Set<any>): boolean {
+        return owners.has(box.owner) || owners.has(box.source);
+    }
+
+    private getStemCollisionWidthPx(): number {
+        return Math.max(this.rules.StemWidth * unitInPixels, Number((VF.Stem as any)?.WIDTH ?? 0), 1);
     }
 }
 
