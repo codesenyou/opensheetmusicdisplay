@@ -4444,34 +4444,278 @@ export abstract class MusicSheetCalculator {
         return direction < 0 ? -1 : 1;
     }
 
+    private getFingeringVexFlowTieDirection(vfTie: any, graphicalTie: GraphicalTie): number {
+        const direction: number = Number(vfTie?.direction);
+        if (direction === 1 || direction === -1) {
+            return direction < 0 ? -1 : 1;
+        }
+        const firstDirection: number = Number(vfTie?.first_note?.getStemDirection?.());
+        if (firstDirection === 1 || firstDirection === -1) {
+            return firstDirection;
+        }
+        const lastDirection: number = Number(vfTie?.last_note?.getStemDirection?.());
+        if (lastDirection === 1 || lastDirection === -1) {
+            return lastDirection;
+        }
+        const tieDirection: PlacementEnum = graphicalTie?.Tie?.getTieDirection(graphicalTie?.StartNote?.sourceNote);
+        if (tieDirection !== undefined) {
+            return tieDirection === PlacementEnum.Below ? 1 : -1;
+        }
+        return 1;
+    }
+
+    private getFingeringVexFlowTieGeometry(vfTie: any): {
+        firstX: number;
+        lastX: number;
+        firstYs: number[];
+        lastYs: number[];
+        firstIndices: number[];
+        lastIndices: number[];
+        firstNote: any;
+        lastNote: any;
+    } {
+        const firstNote: any = vfTie?.first_note;
+        const lastNote: any = vfTie?.last_note;
+        let firstX: number;
+        let lastX: number;
+        let firstYs: number[];
+        let lastYs: number[];
+        let firstIndices: number[] = Array.isArray(vfTie?.first_indices) ? vfTie.first_indices : [0];
+        let lastIndices: number[] = Array.isArray(vfTie?.last_indices) ? vfTie.last_indices : [0];
+
+        if (firstNote) {
+            firstX = firstNote.getTieRightX() + (vfTie?.render_options?.tie_spacing ?? 0);
+            firstYs = firstNote.getYs();
+        } else if (lastNote) {
+            firstX = lastNote.getStave().getTieStartX();
+            firstYs = lastNote.getYs();
+            firstIndices = lastIndices;
+        } else {
+            return undefined;
+        }
+
+        if (lastNote) {
+            lastX = lastNote.getTieLeftX() + (vfTie?.render_options?.tie_spacing ?? 0);
+            lastYs = lastNote.getYs();
+        } else if (firstNote) {
+            lastX = firstNote.getStave().getTieEndX();
+            lastYs = firstNote.getYs();
+            lastIndices = firstIndices;
+        } else {
+            return undefined;
+        }
+
+        if (!Number.isFinite(firstX) || !Number.isFinite(lastX) ||
+            !Array.isArray(firstYs) || !Array.isArray(lastYs) ||
+            firstYs.length === 0 || lastYs.length === 0) {
+                return undefined;
+        }
+        return { firstX, lastX, firstYs, lastYs, firstIndices, lastIndices, firstNote, lastNote };
+    }
+
+    private getFingeringTieReferenceGraphicalNote(graphicalTie: GraphicalTie,
+                                                  geometry: ReturnType<typeof this.getFingeringVexFlowTieGeometry>): GraphicalNote {
+        if (!geometry) {
+            return undefined;
+        }
+        if (geometry.firstNote && graphicalTie?.StartNote) {
+            return graphicalTie.StartNote;
+        }
+        if (geometry.lastNote && graphicalTie?.EndNote) {
+            return graphicalTie.EndNote;
+        }
+        return graphicalTie?.StartNote ?? graphicalTie?.EndNote;
+    }
+
+    private getFingeringVexFlowTieCollisionRect(vfTie: any, line: StaffLine,
+                                                referenceMeasure: GraphicalMeasure,
+                                                graphicalTie?: GraphicalTie): FingeringCollisionRect {
+        const geometry: ReturnType<typeof this.getFingeringVexFlowTieGeometry> =
+            this.getFingeringVexFlowTieGeometry(vfTie);
+        if (!geometry) {
+            return undefined;
+        }
+
+        let collisionMeasure: GraphicalMeasure = referenceMeasure;
+        if (graphicalTie) {
+            const referenceGraphicalNote: GraphicalNote =
+                this.getFingeringTieReferenceGraphicalNote(graphicalTie, geometry);
+            collisionMeasure = referenceGraphicalNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure;
+            if (!referenceGraphicalNote) {
+                return undefined;
+            }
+        }
+        if (!collisionMeasure || collisionMeasure.ParentStaffLine !== line) {
+            return undefined;
+        }
+
+        const direction: number = this.getFingeringVexFlowTieDirection(vfTie, graphicalTie);
+        const yShift: number = Number.isFinite(vfTie?.render_options?.y_shift) ? vfTie.render_options.y_shift : 7;
+        const cp2: number = Number.isFinite(vfTie?.render_options?.cp2) ? vfTie.render_options.cp2 : 12;
+        const yValues: number[] = [];
+        const indexCount: number = Math.max(geometry.firstIndices.length, geometry.lastIndices.length);
+        for (let tieNoteIndex: number = 0; tieNoteIndex < indexCount; tieNoteIndex++) {
+            const firstIndex: number = geometry.firstIndices[Math.min(tieNoteIndex, geometry.firstIndices.length - 1)];
+            const lastIndex: number = geometry.lastIndices[Math.min(tieNoteIndex, geometry.lastIndices.length - 1)];
+            const firstY: number = geometry.firstYs[firstIndex] + yShift * direction;
+            const lastY: number = geometry.lastYs[lastIndex] + yShift * direction;
+            const controlY: number = (firstY + lastY) / 2 + cp2 * direction;
+            if (Number.isFinite(firstY) && Number.isFinite(lastY) && Number.isFinite(controlY)) {
+                yValues.push(firstY, lastY, controlY);
+            }
+        }
+        if (yValues.length === 0) {
+            return undefined;
+        }
+
+        const staveOrigin: { x: number, y: number } =
+            this.getVexFlowStaveOriginPx(geometry.firstNote ?? geometry.lastNote);
+        return this.fingeringPxRectToCollisionRect({
+            x: Math.min(geometry.firstX, geometry.lastX),
+            y: Math.min(...yValues) - 3,
+            width: Math.abs(geometry.lastX - geometry.firstX),
+            height: Math.max(...yValues) - Math.min(...yValues) + 6
+        }, collisionMeasure.PositionAndShape.RelativePosition.x, staveOrigin, "tie", 1.35);
+    }
+
+    private getFingeringTieVexFlowCollisionRect(graphicalTie: GraphicalTie, line: StaffLine): FingeringCollisionRect {
+        return this.getFingeringVexFlowTieCollisionRect(graphicalTie?.vfTie as any, line, undefined, graphicalTie);
+    }
+
+    private getFingeringTieFallbackCollisionRect(graphicalTie: GraphicalTie, line: StaffLine): FingeringCollisionRect {
+        const startNote: GraphicalNote = graphicalTie.StartNote;
+        const endNote: GraphicalNote = graphicalTie.EndNote;
+        const startRect: FingeringCollisionRect = startNote ?
+            this.getBoundingBoxRectInStaffLine(startNote.PositionAndShape, line, true) : undefined;
+        const endRect: FingeringCollisionRect = endNote ?
+            this.getBoundingBoxRectInStaffLine(endNote.PositionAndShape, line, true) : undefined;
+        if (!startRect && !endRect) {
+            return undefined;
+        }
+        const tieDirection: PlacementEnum = graphicalTie.Tie.getTieDirection(startNote?.sourceNote);
+        const left: number = Math.min(startRect?.left ?? endRect.left, endRect?.left ?? startRect.left) - 0.22;
+        const right: number = Math.max(startRect?.right ?? endRect.right, endRect?.right ?? startRect.right) + 0.22;
+        const referenceTop: number = Math.min(startRect?.top ?? endRect.top, endRect?.top ?? startRect.top);
+        const referenceBottom: number = Math.max(startRect?.bottom ?? endRect.bottom, endRect?.bottom ?? startRect.bottom);
+        const centerY: number = tieDirection === PlacementEnum.Below ? referenceBottom + 0.48 : referenceTop - 0.48;
+        const tieThickness: number = 0.34;
+        const tieArchHeight: number = 2.05;
+        return {
+            left,
+            right,
+            top: tieDirection === PlacementEnum.Below ? centerY - tieThickness : centerY - tieArchHeight,
+            bottom: tieDirection === PlacementEnum.Below ? centerY + tieArchHeight : centerY + tieThickness,
+            penalty: 1.15,
+            kind: "tie"
+        };
+    }
+
+    private getFingeringGraphicalNoteVexFlowNote(note: GraphicalNote): any {
+        return (note as any)?.vfnote?.[0];
+    }
+
+    private getFingeringGraphicalNoteVexFlowIndex(note: GraphicalNote): number {
+        const noteIndex: number = Number((note as any)?.vfnote?.[1] ?? (note as any)?.vfnoteIndex ?? 0);
+        return Number.isFinite(noteIndex) ? noteIndex : 0;
+    }
+
+    private addFingeringSplitTieSegmentCollisionRects(rects: FingeringCollisionRect[], graphicalTie: GraphicalTie,
+                                                      line: StaffLine, tieIndex: number): void {
+        const startMeasure: GraphicalMeasure =
+            graphicalTie.StartNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure;
+        const endMeasure: GraphicalMeasure =
+            graphicalTie.EndNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure;
+        if (!startMeasure || !endMeasure || startMeasure.ParentStaffLine === endMeasure.ParentStaffLine) {
+            return;
+        }
+
+        const addSegmentRect: (vfTie: any, debugMeasure: GraphicalMeasure, debugKey: string) => void =
+            (vfTie: any, debugMeasure: GraphicalMeasure, debugKey: string): void => {
+                const tieRect: FingeringCollisionRect =
+                    this.getFingeringVexFlowTieCollisionRect(vfTie, line, undefined, graphicalTie);
+                this.addRectIfValid(rects, this.withFingeringDebugSource(tieRect, debugMeasure, line, debugKey));
+            };
+
+        if (startMeasure.ParentStaffLine === line) {
+            const startVfNote: any = this.getFingeringGraphicalNoteVexFlowNote(graphicalTie.StartNote);
+            if (startVfNote) {
+                addSegmentRect({
+                    first_note: startVfNote,
+                    first_indices: [this.getFingeringGraphicalNoteVexFlowIndex(graphicalTie.StartNote)],
+                    direction: (graphicalTie.vfTie as any)?.direction,
+                    render_options: (graphicalTie.vfTie as any)?.render_options
+                }, startMeasure, `tie-start:${tieIndex}`);
+            }
+        }
+
+        if (endMeasure.ParentStaffLine === line) {
+            const endVfNote: any = this.getFingeringGraphicalNoteVexFlowNote(graphicalTie.EndNote);
+            if (endVfNote) {
+                addSegmentRect({
+                    last_note: endVfNote,
+                    last_indices: [this.getFingeringGraphicalNoteVexFlowIndex(graphicalTie.EndNote)],
+                    direction: (graphicalTie.vfTie as any)?.direction,
+                    render_options: (graphicalTie.vfTie as any)?.render_options
+                }, endMeasure, `tie-end:${tieIndex}`);
+            }
+        }
+    }
+
     private addFingeringTieCollisionRects(rects: FingeringCollisionRect[], gse: GraphicalStaffEntry,
                                           line: StaffLine, measure: GraphicalMeasure): void {
         for (let tieIndex: number = 0; tieIndex < gse.GraphicalTies.length; tieIndex++) {
             const graphicalTie: GraphicalTie = gse.GraphicalTies[tieIndex];
-            const startNote: GraphicalNote = graphicalTie.StartNote;
-            const endNote: GraphicalNote = graphicalTie.EndNote;
-            const startRect: FingeringCollisionRect = startNote ?
-                this.getBoundingBoxRectInStaffLine(startNote.PositionAndShape, line, true) : undefined;
-            const endRect: FingeringCollisionRect = endNote ?
-                this.getBoundingBoxRectInStaffLine(endNote.PositionAndShape, line, true) : undefined;
-            if (!startRect && !endRect) {
-                continue;
-            }
-            const tieDirection: PlacementEnum = graphicalTie.Tie.getTieDirection(startNote?.sourceNote);
-            const left: number = Math.min(startRect?.left ?? endRect.left, endRect?.left ?? startRect.left) - 0.15;
-            const right: number = Math.max(startRect?.right ?? endRect.right, endRect?.right ?? startRect.right) + 0.15;
-            const referenceTop: number = Math.min(startRect?.top ?? endRect.top, endRect?.top ?? startRect.top);
-            const referenceBottom: number = Math.max(startRect?.bottom ?? endRect.bottom, endRect?.bottom ?? startRect.bottom);
-            const centerY: number = tieDirection === PlacementEnum.Below ? referenceBottom + 0.45 : referenceTop - 0.45;
-            this.addRectIfValid(rects, this.withFingeringDebugSource({
-                left,
-                right,
-                top: centerY - 0.25,
-                bottom: centerY + 0.25,
-                penalty: 0.8,
-                kind: "tie"
-            }, measure, line, `tie:${tieIndex}`));
+            const vexFlowTieRect: FingeringCollisionRect =
+                this.getFingeringTieVexFlowCollisionRect(graphicalTie, line);
+            this.addRectIfValid(rects, this.withFingeringDebugSource(vexFlowTieRect, measure, line, `tie:${tieIndex}`));
+            const fallbackTieRect: FingeringCollisionRect =
+                this.getFingeringTieFallbackCollisionRect(graphicalTie, line);
+            this.addRectIfValid(rects, this.withFingeringDebugSource(fallbackTieRect, measure, line, `tie-fallback:${tieIndex}`));
+            this.addFingeringSplitTieSegmentCollisionRects(rects, graphicalTie, line, tieIndex);
         }
+    }
+
+    private addFingeringCrossLineTieCollisionRects(rects: FingeringCollisionRect[], line: StaffLine): void {
+        const seenTies: Set<GraphicalTie> = new Set<GraphicalTie>();
+        let tieIndex: number = 0;
+        for (const measureColumn of this.graphicalMusicSheet?.MeasureList ?? []) {
+            for (const measure of measureColumn ?? []) {
+                for (const staffEntry of measure?.staffEntries ?? []) {
+                    for (const graphicalTie of staffEntry.GraphicalTies ?? []) {
+                        if (seenTies.has(graphicalTie)) {
+                            continue;
+                        }
+                        seenTies.add(graphicalTie);
+                        const startLine: StaffLine =
+                            graphicalTie.StartNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure?.ParentStaffLine;
+                        const endLine: StaffLine =
+                            graphicalTie.EndNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure?.ParentStaffLine;
+                        if (startLine && endLine && startLine !== endLine && (startLine === line || endLine === line)) {
+                            this.addFingeringSplitTieSegmentCollisionRects(rects, graphicalTie, line, tieIndex);
+                            tieIndex++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private addFingeringVexFlowMeasureTieCollisionRects(rects: FingeringCollisionRect[], measure: GraphicalMeasure,
+                                                        line: StaffLine): boolean {
+        const vfTies: any[] = (measure as any)?.vfTies;
+        if (!Array.isArray(vfTies) || vfTies.length === 0) {
+            return false;
+        }
+
+        let addedTieRect: boolean = false;
+        for (let tieIndex: number = 0; tieIndex < vfTies.length; tieIndex++) {
+            const tieRect: FingeringCollisionRect =
+                this.getFingeringVexFlowTieCollisionRect(vfTies[tieIndex], line, measure);
+            const previousLength: number = rects.length;
+            this.addRectIfValid(rects, this.withFingeringDebugSource(tieRect, measure, line, `vf-tie:${tieIndex}`));
+            addedTieRect = addedTieRect || rects.length > previousLength;
+        }
+        return addedTieRect;
     }
 
     private getFingeringOrnamentReserveSize(ornamentContainer: OrnamentContainer): { halfWidth: number, height: number } {
@@ -4594,8 +4838,7 @@ export abstract class MusicSheetCalculator {
     }
 
     private getFingeringCollisionRects(system: MusicSystem, line: StaffLine, measure: GraphicalMeasure,
-                                       placement: PlacementEnum,
-                                       currentGse: GraphicalStaffEntry): FingeringCollisionRect[] {
+                                       placement: PlacementEnum): FingeringCollisionRect[] {
         const rects: FingeringCollisionRect[] = [];
         const currentMeasureIndex: number = line.Measures.indexOf(measure);
         const firstMeasureIndex: number = Math.max(0, currentMeasureIndex - 1);
@@ -4603,6 +4846,8 @@ export abstract class MusicSheetCalculator {
         for (let measureIndex: number = firstMeasureIndex; measureIndex <= lastMeasureIndex; measureIndex++) {
             const nearbyMeasure: GraphicalMeasure = line.Measures[measureIndex];
             this.addFingeringBeamCollisionRects(rects, nearbyMeasure, line);
+            const hasMeasureTieRects: boolean =
+                this.addFingeringVexFlowMeasureTieCollisionRects(rects, nearbyMeasure, line);
             for (const staffEntry of nearbyMeasure.staffEntries) {
                 for (const voiceEntry of staffEntry.graphicalVoiceEntries) {
                     for (const note of voiceEntry.notes) {
@@ -4627,11 +4872,12 @@ export abstract class MusicSheetCalculator {
                 if (!attachedModifierKinds.has("ornament")) {
                     this.addFingeringOrnamentReserveRects(rects, staffEntry, line, nearbyMeasure);
                 }
-                if (staffEntry === currentGse) {
+                if (!hasMeasureTieRects) {
                     this.addFingeringTieCollisionRects(rects, staffEntry, line, nearbyMeasure);
                 }
             }
         }
+        this.addFingeringCrossLineTieCollisionRects(rects, line);
         for (let labelIndex: number = 0; labelIndex < system.MeasureNumberLabels.length; labelIndex++) {
             const measureNumberLabel: GraphicalLabel = system.MeasureNumberLabels[labelIndex];
             this.addRectIfValid(rects, this.withFingeringDebugSource(
@@ -4714,39 +4960,145 @@ export abstract class MusicSheetCalculator {
         return kind === "ornament" || kind === "ornament-reserve";
     }
 
+    private isFingeringHardCollisionKind(kind: string): boolean {
+        return kind === "beam" || kind === "notehead" || kind === "stem" || kind === "tie";
+    }
+
+    private isFingeringTargetedVerticalCollisionKind(kind: string): boolean {
+        return this.isFingeringOrnamentCollisionKind(kind) || this.isFingeringHardCollisionKind(kind);
+    }
+
     private getFingeringCollisionClearancePadding(kind: string): number {
-        return this.isFingeringOrnamentCollisionKind(kind) ? 0.18 : 0.035;
+        switch (kind) {
+            case "ornament":
+            case "ornament-reserve":
+                return 0.18;
+            case "tie":
+                return 0.18;
+            case "beam":
+                return 0.12;
+            case "notehead":
+                return 0.10;
+            case "stem":
+                return 0.08;
+            default:
+                return 0.035;
+        }
+    }
+
+    private getFingeringCollisionClearanceFactor(kind: string): number {
+        if (this.isFingeringOrnamentCollisionKind(kind)) {
+            return 95;
+        }
+        if (kind === "tie") {
+            return 60;
+        }
+        if (this.isFingeringHardCollisionKind(kind)) {
+            return 44;
+        }
+        return 16;
+    }
+
+    private getFingeringGroupEnvelopeRect(items: FingeringPlacementWorkItem[]): FingeringCollisionRect {
+        return {
+            left: Math.min(...items.map((item: FingeringPlacementWorkItem) => item.initialRect.left)),
+            right: Math.max(...items.map((item: FingeringPlacementWorkItem) => item.initialRect.right)),
+            top: Math.min(...items.map((item: FingeringPlacementWorkItem) => item.initialRect.top)),
+            bottom: Math.max(...items.map((item: FingeringPlacementWorkItem) => item.initialRect.bottom)),
+            penalty: 1
+        };
+    }
+
+    private getFingeringCandidateEnvelopeRect(candidates: FingeringLabelCandidate[]): FingeringCollisionRect {
+        return {
+            left: Math.min(...candidates.map((candidate: FingeringLabelCandidate) => candidate.rect.left)),
+            right: Math.max(...candidates.map((candidate: FingeringLabelCandidate) => candidate.rect.right)),
+            top: Math.min(...candidates.map((candidate: FingeringLabelCandidate) => candidate.rect.top)),
+            bottom: Math.max(...candidates.map((candidate: FingeringLabelCandidate) => candidate.rect.bottom)),
+            penalty: 1
+        };
+    }
+
+    private getFingeringPlacedGroupEnvelopeRect(items: FingeringPlacementWorkItem[]): FingeringCollisionRect {
+        const placedRects: FingeringCollisionRect[] = items
+            .map((item: FingeringPlacementWorkItem) => item.placedRect)
+            .filter((rect: FingeringCollisionRect) => !!rect);
+        if (placedRects.length === 0) {
+            return undefined;
+        }
+        return {
+            left: Math.min(...placedRects.map((rect: FingeringCollisionRect) => rect.left)),
+            right: Math.max(...placedRects.map((rect: FingeringCollisionRect) => rect.right)),
+            top: Math.min(...placedRects.map((rect: FingeringCollisionRect) => rect.top)),
+            bottom: Math.max(...placedRects.map((rect: FingeringCollisionRect) => rect.bottom)),
+            penalty: 1
+        };
+    }
+
+    private addFingeringTargetedVerticalOffsets(offsets: number[], rect: FingeringCollisionRect,
+                                                placement: PlacementEnum,
+                                                collisionRects: FingeringCollisionRect[]): void {
+        const maxTargetedShift: number = 9.2;
+        const maxOppositeSideShift: number = 6.2;
+        const outwardSign: number = placement === PlacementEnum.Above ? -1 : 1;
+        for (const collisionRect of collisionRects) {
+            const kind: string = collisionRect.kind ?? "unknown";
+            if (!this.isFingeringTargetedVerticalCollisionKind(kind)) {
+                continue;
+            }
+            const padding: number = this.getFingeringCollisionClearancePadding(kind);
+            const horizontalOverlap: number =
+                Math.min(rect.right, collisionRect.right) + padding -
+                (Math.max(rect.left, collisionRect.left) - padding);
+            if (horizontalOverlap <= 0) {
+                continue;
+            }
+            const outwardTargetDy: number = placement === PlacementEnum.Above
+                ? collisionRect.top - rect.bottom - padding * 2
+                : collisionRect.bottom - rect.top + padding * 2;
+            if (!((placement === PlacementEnum.Above && outwardTargetDy >= -0.0001) ||
+                (placement === PlacementEnum.Below && outwardTargetDy <= 0.0001) ||
+                Math.abs(outwardTargetDy) > maxTargetedShift)) {
+                    offsets.push(
+                        outwardTargetDy,
+                        outwardTargetDy + outwardSign * 0.04,
+                        outwardTargetDy + outwardSign * 0.12
+                    );
+            }
+
+            if (!this.isFingeringHardCollisionKind(kind)) {
+                continue;
+            }
+            const oppositeTargetDy: number = placement === PlacementEnum.Above
+                ? collisionRect.bottom - rect.top + padding * 2
+                : collisionRect.top - rect.bottom - padding * 2;
+            if ((placement === PlacementEnum.Above && oppositeTargetDy <= 0.0001) ||
+                (placement === PlacementEnum.Below && oppositeTargetDy >= -0.0001) ||
+                Math.abs(oppositeTargetDy) > maxOppositeSideShift) {
+                    continue;
+            }
+            offsets.push(
+                oppositeTargetDy,
+                oppositeTargetDy - outwardSign * 0.04,
+                oppositeTargetDy - outwardSign * 0.12
+            );
+        }
     }
 
     private getFingeringVerticalSearchOffsetsForCollisions(items: FingeringPlacementWorkItem[],
                                                            placement: PlacementEnum,
                                                            collisionRects: FingeringCollisionRect[]): number[] {
         const offsets: number[] = this.getFingeringVerticalSearchOffsets(items, placement);
-        const maxTargetedShift: number = 9.2;
         for (const item of items) {
-            for (const collisionRect of collisionRects) {
-                const kind: string = collisionRect.kind ?? "unknown";
-                if (!this.isFingeringOrnamentCollisionKind(kind)) {
-                    continue;
-                }
-                const padding: number = this.getFingeringCollisionClearancePadding(kind);
-                const horizontalOverlap: number =
-                    Math.min(item.initialRect.right, collisionRect.right) + padding -
-                    (Math.max(item.initialRect.left, collisionRect.left) - padding);
-                if (horizontalOverlap <= 0) {
-                    continue;
-                }
-                const targetDy: number = placement === PlacementEnum.Above
-                    ? collisionRect.top - item.initialRect.bottom - padding * 2
-                    : collisionRect.bottom - item.initialRect.top + padding * 2;
-                if ((placement === PlacementEnum.Above && targetDy >= -0.0001) ||
-                    (placement === PlacementEnum.Below && targetDy <= 0.0001) ||
-                    Math.abs(targetDy) > maxTargetedShift) {
-                    continue;
-                }
-                const outwardSign: number = placement === PlacementEnum.Above ? -1 : 1;
-                offsets.push(targetDy, targetDy + outwardSign * 0.04, targetDy + outwardSign * 0.12);
-            }
+            this.addFingeringTargetedVerticalOffsets(offsets, item.initialRect, placement, collisionRects);
+        }
+        if (items.length > 1) {
+            this.addFingeringTargetedVerticalOffsets(
+                offsets,
+                this.getFingeringGroupEnvelopeRect(items),
+                placement,
+                collisionRects
+            );
         }
         const uniqueOffsets: number[] = [];
         const seen: Set<string> = new Set<string>();
@@ -4769,15 +5121,15 @@ export abstract class MusicSheetCalculator {
             case "measure-number":
                 return 70;
             case "notehead":
-                return 40;
+                return stacked ? 95 : 46;
             case "rest":
                 return 30;
             case "stem":
-                return stacked ? 5 : 28;
+                return stacked ? 70 : 28;
             case "note":
                 return 16;
             case "beam":
-                return stacked ? 3 : 8;
+                return stacked ? 85 : 18;
             case "ornament":
                 return 130;
             case "articulation":
@@ -4785,7 +5137,7 @@ export abstract class MusicSheetCalculator {
             case "ornament-reserve":
                 return 115;
             case "tie":
-                return 12;
+                return stacked ? 90 : 60;
             default:
                 return 14;
         }
@@ -4808,7 +5160,7 @@ export abstract class MusicSheetCalculator {
             const kindWeight: number = this.getFingeringCollisionKindWeight(kind, stacked);
             const rectPenalty: number = collisionRect.penalty ?? 1;
             const softFactor: number = collisionRect.soft ? 0.45 : 1;
-            const clearanceFactor: number = this.isFingeringOrnamentCollisionKind(kind) ? 95 : 16;
+            const clearanceFactor: number = this.getFingeringCollisionClearanceFactor(kind);
             cost += (actualOverlap * 120 + paddedOverlap * clearanceFactor) * kindWeight * rectPenalty * softFactor;
         }
         return cost;
@@ -4886,6 +5238,161 @@ export abstract class MusicSheetCalculator {
             cost + Math.abs(candidate.dx) * 26 + Math.abs(candidate.dx - meanDx) * 32, 0);
     }
 
+    private getFingeringStackHardCollisionCost(candidates: FingeringLabelCandidate[],
+                                               collisionRects: FingeringCollisionRect[]): number {
+        if (candidates.length < 2) {
+            return 0;
+        }
+        const envelopeRect: FingeringCollisionRect = this.getFingeringCandidateEnvelopeRect(candidates);
+        let cost: number = 0;
+        for (const collisionRect of collisionRects) {
+            const kind: string = collisionRect.kind ?? "unknown";
+            if (!this.isFingeringHardCollisionKind(kind)) {
+                continue;
+            }
+            const padding: number = this.getFingeringCollisionClearancePadding(kind);
+            const envelopeOverlap: number = this.getRectOverlapArea(
+                this.expandFingeringRect(envelopeRect, padding),
+                this.expandFingeringRect(collisionRect, padding)
+            );
+            if (envelopeOverlap <= 0) {
+                continue;
+            }
+            const actualOverlap: number = this.getRectOverlapArea(envelopeRect, collisionRect);
+            const kindWeight: number = this.getFingeringCollisionKindWeight(kind, true);
+            const rectPenalty: number = collisionRect.penalty ?? 1;
+            const softFactor: number = collisionRect.soft ? 0.45 : 1;
+            cost += (actualOverlap * 90 + envelopeOverlap * this.getFingeringCollisionClearanceFactor(kind)) *
+                kindWeight * rectPenalty * softFactor;
+        }
+        return cost;
+    }
+
+    private hasFingeringHardCollision(rect: FingeringCollisionRect,
+                                      collisionRects: FingeringCollisionRect[]): boolean {
+        for (const collisionRect of collisionRects) {
+            if (!this.isFingeringHardCollisionKind(collisionRect.kind ?? "unknown")) {
+                continue;
+            }
+            if (this.getRectOverlapArea(rect, collisionRect) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private getFingeringResidualVerticalOffsets(items: FingeringPlacementWorkItem[],
+                                                hardCollisionRects: FingeringCollisionRect[]): number[] {
+        const placement: PlacementEnum = items[0].placement;
+        const offsets: number[] = [0];
+        for (const item of items) {
+            if (!item.placedRect) {
+                continue;
+            }
+            this.addFingeringTargetedVerticalOffsets(offsets, item.placedRect, placement, hardCollisionRects);
+        }
+        if (items.length > 1) {
+            const envelopeRect: FingeringCollisionRect = this.getFingeringPlacedGroupEnvelopeRect(items);
+            if (envelopeRect) {
+                this.addFingeringTargetedVerticalOffsets(offsets, envelopeRect, placement, hardCollisionRects);
+            }
+        }
+        for (let shift: number = -6.2; shift <= 6.2001; shift += 0.08) {
+            offsets.push(shift);
+        }
+
+        const uniqueOffsets: number[] = [];
+        const seen: Set<string> = new Set<string>();
+        for (const offset of offsets) {
+            const key: string = offset.toFixed(3);
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            uniqueOffsets.push(offset);
+        }
+        return uniqueOffsets.sort((left: number, right: number) =>
+            Math.abs(left) - Math.abs(right) || left - right);
+    }
+
+    private getFingeringResidualGroupCost(items: FingeringPlacementWorkItem[], dy: number,
+                                          collisionRects: FingeringCollisionRect[]): {
+        candidates: FingeringLabelCandidate[];
+        cost: number;
+    } {
+        const stacked: boolean = items.length > 1;
+        const candidates: FingeringLabelCandidate[] = items.map((item: FingeringPlacementWorkItem) => {
+            const rect: FingeringCollisionRect = this.shiftFingeringRect(item.placedRect, 0, dy);
+            return {
+                dx: 0,
+                dy,
+                rect,
+                cost: this.getFingeringCollisionCost(rect, collisionRects, stacked)
+            };
+        });
+        const collisionCost: number = candidates.reduce(
+            (sum: number, candidate: FingeringLabelCandidate) => sum + candidate.cost, 0);
+        const movementCost: number = Math.abs(dy) * 22 + dy * dy * 10;
+        return {
+            candidates,
+            cost: collisionCost + movementCost + this.getFingeringStackHardCollisionCost(candidates, collisionRects)
+        };
+    }
+
+    private getFingeringHardCollisionOverlapArea(candidates: FingeringLabelCandidate[],
+                                                 hardCollisionRects: FingeringCollisionRect[]): number {
+        let overlapArea: number = 0;
+        for (const candidate of candidates) {
+            for (const collisionRect of hardCollisionRects) {
+                overlapArea += this.getRectOverlapArea(candidate.rect, collisionRect);
+            }
+        }
+        return overlapArea;
+    }
+
+    private resolveResidualFingeringHardCollisions(items: FingeringPlacementWorkItem[],
+                                                   collisionRects: FingeringCollisionRect[]): void {
+        const hardCollisionRects: FingeringCollisionRect[] = collisionRects.filter((rect: FingeringCollisionRect) =>
+            this.isFingeringHardCollisionKind(rect.kind ?? "unknown"));
+        if (hardCollisionRects.length === 0 ||
+            !items.some((item: FingeringPlacementWorkItem) =>
+                item.placedRect && this.hasFingeringHardCollision(item.placedRect, hardCollisionRects))) {
+                    return;
+        }
+
+        let bestDy: number = 0;
+        let bestCost: number = Number.POSITIVE_INFINITY;
+        let bestHardOverlapArea: number = Number.POSITIVE_INFINITY;
+        for (const dy of this.getFingeringResidualVerticalOffsets(items, hardCollisionRects)) {
+            const resolution: { candidates: FingeringLabelCandidate[], cost: number } =
+                this.getFingeringResidualGroupCost(items, dy, collisionRects);
+            const hardOverlapArea: number =
+                this.getFingeringHardCollisionOverlapArea(resolution.candidates, hardCollisionRects);
+            if (hardOverlapArea < bestHardOverlapArea - 0.0001 ||
+                (Math.abs(hardOverlapArea - bestHardOverlapArea) <= 0.0001 &&
+                    (resolution.cost < bestCost - 0.0001 ||
+                        (Math.abs(resolution.cost - bestCost) <= 0.0001 && Math.abs(dy) < Math.abs(bestDy))))) {
+                    bestDy = dy;
+                    bestCost = resolution.cost;
+                    bestHardOverlapArea = hardOverlapArea;
+            }
+        }
+
+        if (Math.abs(bestDy) <= 0.0001) {
+            return;
+        }
+        for (const item of items) {
+            const currentPosition: PointF2D = item.label.PositionAndShape.RelativePosition;
+            this.setFingeringLabelPosition(
+                item.label,
+                currentPosition.x,
+                currentPosition.y + bestDy,
+                item.placement
+            );
+            item.placedRect = this.getLabelRect(item.label);
+        }
+    }
+
     private getFingeringGroupResolution(items: FingeringPlacementWorkItem[],
                                         collisionRects: FingeringCollisionRect[],
                                         measure: GraphicalMeasure, line: StaffLine): FingeringGroupResolution {
@@ -4905,7 +5412,8 @@ export abstract class MusicSheetCalculator {
             const cost: number = collisionCost +
                 this.getFingeringVerticalMovementCost(dy, items.length) +
                 this.getFingeringStackOverlapCost(candidates) +
-                this.getFingeringStackAlignmentCost(candidates);
+                this.getFingeringStackAlignmentCost(candidates) +
+                this.getFingeringStackHardCollisionCost(candidates, relevantCollisionRects);
             if (!bestResolution || cost < bestResolution.cost - 0.0001 ||
                 (Math.abs(cost - bestResolution.cost) <= 0.0001 && Math.abs(dy) < Math.abs(bestResolution.dy))) {
                     bestResolution = { dy, candidates, cost };
@@ -5303,7 +5811,7 @@ export abstract class MusicSheetCalculator {
         }
         this.separateOverlappingFingeringStack(items);
         const placement: PlacementEnum = items[0].placement;
-        const collisionRects: FingeringCollisionRect[] = this.getFingeringCollisionRects(system, line, measure, placement, gse);
+        const collisionRects: FingeringCollisionRect[] = this.getFingeringCollisionRects(system, line, measure, placement);
         const resolution: FingeringGroupResolution = this.getFingeringGroupResolution(items, collisionRects, measure, line);
         for (let itemIndex: number = 0; itemIndex < items.length; itemIndex++) {
             const item: FingeringPlacementWorkItem = items[itemIndex];
@@ -5313,6 +5821,7 @@ export abstract class MusicSheetCalculator {
             this.setFingeringLabelPosition(item.label, resolvedX, resolvedY, item.placement);
             item.placedRect = this.getLabelRect(item.label);
         }
+        this.resolveResidualFingeringHardCollisions(items, collisionRects);
 
         for (const item of items) {
             const debugCollisionRects: FingeringCollisionRect[] =
