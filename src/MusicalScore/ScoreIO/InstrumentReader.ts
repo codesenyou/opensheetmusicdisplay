@@ -313,6 +313,9 @@ export class InstrumentReader {
           const isGraceNote: boolean = xmlNode.element("grace") !== undefined || noteDivisions === 0 || isChord && lastNoteWasGrace;
           let graceNoteSlash: boolean = false;
           let graceSlur: boolean = false;
+          let graceStealTimePrevious: number | undefined;
+          let graceStealTimeFollowing: number | undefined;
+          let graceMakeTimeRealValue: number | undefined;
           if (isGraceNote) {
             const graceNode: IXmlElement = xmlNode.element("grace");
             if (graceNode && graceNode.attributes()) {
@@ -321,6 +324,20 @@ export class InstrumentReader {
                 if (slash === "yes") {
                   graceNoteSlash = true;
                 }
+              }
+              if (graceNode.attribute("steal-time-previous")) {
+                const value: number = parseFloat(graceNode.attribute("steal-time-previous").value);
+                graceStealTimePrevious = Number.isFinite(value) ? value : undefined;
+              }
+              if (graceNode.attribute("steal-time-following")) {
+                const value: number = parseFloat(graceNode.attribute("steal-time-following").value);
+                graceStealTimeFollowing = Number.isFinite(value) ? value : undefined;
+              }
+              if (graceNode.attribute("make-time")) {
+                const divisions: number = parseFloat(graceNode.attribute("make-time").value);
+                graceMakeTimeRealValue = Number.isFinite(divisions) && this.divisions > 0
+                  ? divisions / (4 * this.divisions)
+                  : undefined;
               }
             }
 
@@ -364,7 +381,9 @@ export class InstrumentReader {
             || (!isGraceNote && lastNoteWasGrace)
           ) {
             this.currentVoiceGenerator.createVoiceEntry(musicTimestamp, this.currentStaffEntry, !isGraceNote,
-                                                        isGraceNote, graceNoteSlash, graceSlur);
+                                                        isGraceNote, graceNoteSlash, graceSlur,
+                                                        graceStealTimePrevious, graceStealTimeFollowing,
+                                                        graceMakeTimeRealValue);
             // we previously excluded rest notes from a voice's voice entry (!restNote && !isGraceNote),
             //   but there seems to be no reason to. Rest notes also belong to a voice line. See #1612
           }

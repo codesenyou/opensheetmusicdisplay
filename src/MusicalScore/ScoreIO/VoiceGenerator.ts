@@ -95,8 +95,13 @@ export class VoiceGenerator {
    * @param isGrace States whether the new VoiceEntry (only) has grace notes
    */
   public createVoiceEntry(musicTimestamp: Fraction, parentStaffEntry: SourceStaffEntry, addToVoice: boolean,
-                          isGrace: boolean = false, graceNoteSlash: boolean = false, graceSlur: boolean = false): void {
-    this.currentVoiceEntry = new VoiceEntry(musicTimestamp.clone(), this.voice, parentStaffEntry, isGrace, graceNoteSlash, graceSlur);
+                          isGrace: boolean = false, graceNoteSlash: boolean = false, graceSlur: boolean = false,
+                          graceStealTimePrevious?: number, graceStealTimeFollowing?: number,
+                          graceMakeTimeRealValue?: number): void {
+    this.currentVoiceEntry = new VoiceEntry(
+      musicTimestamp.clone(), this.voice, parentStaffEntry, isGrace, graceNoteSlash, graceSlur,
+      graceStealTimePrevious, graceStealTimeFollowing, graceMakeTimeRealValue
+    );
     if (addToVoice) {
       this.voice.VoiceEntries.push(this.currentVoiceEntry);
     }

@@ -27,7 +27,8 @@ export class VoiceEntry {
      * @param graceNoteSlash States whether the grace note(s) have a slash (Acciaccatura, played before the beat)
      */
     constructor(timestamp: Fraction, parentVoice: Voice, parentSourceStaffEntry: SourceStaffEntry,
-                isGrace: boolean = false, graceNoteSlash: boolean = false, graceSlur: boolean = false) {
+                isGrace: boolean = false, graceNoteSlash: boolean = false, graceSlur: boolean = false,
+                graceStealTimePrevious?: number, graceStealTimeFollowing?: number, graceMakeTimeRealValue?: number) {
         this.timestamp = timestamp;
         this.parentVoice = parentVoice;
         this.parentSourceStaffEntry = parentSourceStaffEntry;
@@ -35,6 +36,9 @@ export class VoiceEntry {
         this.graceAfterMainNote = false;
         this.graceNoteSlash = graceNoteSlash;
         this.graceSlur = graceSlur;
+        this.graceStealTimePrevious = graceStealTimePrevious;
+        this.graceStealTimeFollowing = graceStealTimeFollowing;
+        this.graceMakeTimeRealValue = graceMakeTimeRealValue;
 
         // add currentVoiceEntry to staff entry:
         if (parentSourceStaffEntry !== undefined) {
@@ -54,6 +58,12 @@ export class VoiceEntry {
     private graceAfterMainNote: boolean;
     private graceNoteSlash: boolean;
     private graceSlur: boolean; // TODO grace slur system could be refined to be non-binary
+    /** MusicXML playback hint: percentage of time stolen from the previous note. */
+    private graceStealTimePrevious?: number;
+    /** MusicXML playback hint: percentage of time stolen from the following note. */
+    private graceStealTimeFollowing?: number;
+    /** MusicXML playback hint converted from divisions to a whole-note fraction. */
+    private graceMakeTimeRealValue?: number;
     private articulations: Articulation[] = [];
     private technicalInstructions: TechnicalInstruction[] = [];
     private lyricsEntries: Dictionary<string, LyricsEntry> = new Dictionary<string, LyricsEntry>();
@@ -107,6 +117,15 @@ export class VoiceEntry {
     }
     public set GraceSlur(value: boolean) {
         this.graceSlur = value;
+    }
+    public get GraceStealTimePrevious(): number | undefined {
+        return this.graceStealTimePrevious;
+    }
+    public get GraceStealTimeFollowing(): number | undefined {
+        return this.graceStealTimeFollowing;
+    }
+    public get GraceMakeTimeRealValue(): number | undefined {
+        return this.graceMakeTimeRealValue;
     }
     public get Articulations(): Articulation[] {
         return this.articulations;
