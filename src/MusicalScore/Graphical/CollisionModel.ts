@@ -110,14 +110,32 @@ export class CollisionModel {
 
     private boxes: CollisionBox[] = [];
     private nextId: number = 1;
+    private kindIndexes: Map<string, CollisionKindSpatialIndex> = new Map<string, CollisionKindSpatialIndex>();
 
     public clear(): void {
         this.boxes = [];
         this.nextId = 1;
+        this.kindIndexes.clear();
     }
 
     public get Boxes(): CollisionBox[] {
         return this.boxes;
+    }
+
+    /**
+     * Returns, in registration order, every box of one of the given kinds whose rect could overlap the
+     * query region (in units). The result is a conservative superset: callers still run their exact
+     * overlap test on each returned box. Boxes registered since the last query are indexed lazily.
+     * @param indexKey identifies the kind set, so each distinct set keeps its own index.
+     */
+    public queryBoxesOfKinds(indexKey: string, kinds: ReadonlySet<CollisionBoxKind>,
+                             left: number, top: number, right: number, bottom: number): CollisionBox[] {
+        let index: CollisionKindSpatialIndex = this.kindIndexes.get(indexKey);
+        if (!index || index.boxes !== this.boxes) {
+            index = new CollisionKindSpatialIndex(this.boxes, kinds);
+            this.kindIndexes.set(indexKey, index);
+        }
+        return index.query(left, top, right, bottom);
     }
 
     public registerBoundingBoxesFromMusicSheet(graphicalMusicSheet: GraphicalMusicSheet): void {
@@ -421,5 +439,116 @@ export class CollisionModel {
             }
         }
         return candidates;
+    }
+}
+
+/**
+ * Uniform-grid index over the boxes of a CollisionModel that have one of a fixed set of kinds.
+ * Only used to prefilter candidates; it never decides a collision by itself.
+ */
+class CollisionKindSpatialIndex {
+    private static readonly cellSize: number = 4;
+    private static readonly maxCellsPerBox: number = 256;
+    private static readonly cellRowSpan: number = 2097152;
+    private static readonly cellRowOffset: number = 1048576;
+
+    public readonly boxes: CollisionBox[];
+    private readonly kinds: ReadonlySet<CollisionBoxKind>;
+    private readonly cells: Map<number, number[]> = new Map<number, number[]>();
+    /** boxes too large (or too far out) for the grid; returned by every query */
+    private readonly unbucketed: number[] = [];
+    private readonly seenStamps: number[] = [];
+    private indexedCount: number = 0;
+    private queryStamp: number = 0;
+
+    constructor(boxes: CollisionBox[], kinds: ReadonlySet<CollisionBoxKind>) {
+        this.boxes = boxes;
+        this.kinds = kinds;
+    }
+
+    public query(left: number, top: number, right: number, bottom: number): CollisionBox[] {
+        this.indexNewBoxes();
+        const result: CollisionBox[] = [];
+        const cellSize: number = CollisionKindSpatialIndex.cellSize;
+        const cx0: number = Math.floor(left / cellSize) - 1;
+        const cx1: number = Math.floor(right / cellSize) + 1;
+        const cy0: number = Math.floor(top / cellSize) - 1;
+        const cy1: number = Math.floor(bottom / cellSize) + 1;
+        const indices: number[] = this.unbucketed.slice();
+        if (!this.isGridRange(cx0, cx1, cy0, cy1) ||
+            (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > CollisionKindSpatialIndex.maxCellsPerBox * 16) {
+            // query region too large for the grid: fall back to every indexed box
+            for (let i: number = 0; i < this.indexedCount; i++) {
+                if (this.kinds.has(this.boxes[i].kind)) {
+                    result.push(this.boxes[i]);
+                }
+            }
+            return result;
+        }
+        const stamp: number = ++this.queryStamp;
+        for (const index of indices) {
+            this.seenStamps[index] = stamp;
+        }
+        for (let cx: number = cx0; cx <= cx1; cx++) {
+            for (let cy: number = cy0; cy <= cy1; cy++) {
+                const cell: number[] = this.cells.get(this.cellKey(cx, cy));
+                if (!cell) {
+                    continue;
+                }
+                for (const index of cell) {
+                    if (this.seenStamps[index] !== stamp) {
+                        this.seenStamps[index] = stamp;
+                        indices.push(index);
+                    }
+                }
+            }
+        }
+        indices.sort((a: number, b: number) => a - b);
+        for (const index of indices) {
+            result.push(this.boxes[index]);
+        }
+        return result;
+    }
+
+    private indexNewBoxes(): void {
+        const cellSize: number = CollisionKindSpatialIndex.cellSize;
+        for (; this.indexedCount < this.boxes.length; this.indexedCount++) {
+            const index: number = this.indexedCount;
+            const box: CollisionBox = this.boxes[index];
+            if (!box || !this.kinds.has(box.kind)) {
+                continue;
+            }
+            const rect: CollisionRect = box.rect;
+            const cx0: number = Math.floor(rect.x / cellSize);
+            const cx1: number = Math.floor((rect.x + rect.width) / cellSize);
+            const cy0: number = Math.floor(rect.y / cellSize);
+            const cy1: number = Math.floor((rect.y + rect.height) / cellSize);
+            if (!this.isGridRange(cx0, cx1, cy0, cy1) ||
+                (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > CollisionKindSpatialIndex.maxCellsPerBox) {
+                this.unbucketed.push(index);
+                continue;
+            }
+            for (let cx: number = cx0; cx <= cx1; cx++) {
+                for (let cy: number = cy0; cy <= cy1; cy++) {
+                    const key: number = this.cellKey(cx, cy);
+                    let cell: number[] = this.cells.get(key);
+                    if (!cell) {
+                        cell = [];
+                        this.cells.set(key, cell);
+                    }
+                    cell.push(index);
+                }
+            }
+        }
+    }
+
+    private isGridRange(cx0: number, cx1: number, cy0: number, cy1: number): boolean {
+        const limit: number = CollisionKindSpatialIndex.cellRowOffset;
+        return Number.isFinite(cx0) && Number.isFinite(cx1) && Number.isFinite(cy0) && Number.isFinite(cy1) &&
+            cx0 > -limit && cx1 < limit && cy0 > -limit && cy1 < limit;
+    }
+
+    private cellKey(cx: number, cy: number): number {
+        return cx * CollisionKindSpatialIndex.cellRowSpan + (cy + CollisionKindSpatialIndex.cellRowOffset);
     }
 }

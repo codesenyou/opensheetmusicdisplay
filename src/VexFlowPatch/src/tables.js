@@ -5,6 +5,28 @@
 import { Vex } from './vex';
 import { Fraction } from './fraction';
 import { Glyph } from './glyph';
+import { Element } from './element';
+import { Registry } from './registry';
+
+// Width of `new Glyph(code, point).getMetrics().width`. Building a Glyph parses and measures its whole outline,
+// and note glyph widths are requested for every getStemX() call, so widths are cached by code and point.
+// A cache hit still takes the element id that the throwaway Glyph would have taken, so the ids of all later
+// elements stay unchanged. With a default registry, Glyphs register themselves, so nothing is cached then.
+const noteGlyphWidthCache = new Map();
+function getNoteGlyphWidth(code, point) {
+  if (Registry.getDefaultRegistry()) {
+    return new Glyph(code, point).getMetrics().width;
+  }
+  const key = `${code}|${point}`;
+  const cachedWidth = noteGlyphWidthCache.get(key);
+  if (cachedWidth !== undefined) {
+    Element.newID();
+    return cachedWidth;
+  }
+  const width = new Glyph(code, point).getMetrics().width;
+  noteGlyphWidthCache.set(key, width);
+  return width;
+}
 
 const Flow = {
   STEM_WIDTH: 1.5,
@@ -661,7 +683,7 @@ Flow.getGlyphProps.duration_codes = {
   '1/2': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'v53', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'v53', scale);
       },
       stem: false,
       stem_offset: 0,
@@ -701,7 +723,7 @@ Flow.getGlyphProps.duration_codes = {
   '1': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'v1d', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'v1d', scale);
       },
       stem: false,
       stem_offset: 0,
@@ -741,7 +763,7 @@ Flow.getGlyphProps.duration_codes = {
   '2': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'v81', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'v81', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -782,7 +804,7 @@ Flow.getGlyphProps.duration_codes = {
   '4': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -825,7 +847,7 @@ Flow.getGlyphProps.duration_codes = {
   '8': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -872,7 +894,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 2,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -918,7 +940,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 3,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -964,7 +986,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 4,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -1010,7 +1032,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 5,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return getNoteGlyphWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,

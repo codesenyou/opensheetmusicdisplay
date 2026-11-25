@@ -530,6 +530,10 @@ export class EngravingRules {
     public NoteToGraphicalNoteMap: Dictionary<number, GraphicalNote>;
     // this is basically a WeakMap, except we save the id in the Note instead of using a WeakMap.
     public NoteToGraphicalNoteMapObjectCount: number = 0;
+    /** Array mirror of NoteToGraphicalNoteMap (same keys and values), for fast GNote() lookups.
+     *  Only trusted while NoteToGraphicalNoteMap is still the dictionary it mirrors. */
+    private noteToGraphicalNoteList: GraphicalNote[] = [];
+    private noteToGraphicalNoteListSource: Dictionary<number, GraphicalNote>;
     /** How many times osmd.render() was already called on the currently loaded score.
      * Resets after osmd.load() (via osmd.reset()).
      * Can be relevant for transposition or generally informative.
@@ -1051,7 +1055,23 @@ export class EngravingRules {
     public addGraphicalNoteToNoteMap(note: Note, graphicalNote: GraphicalNote): void {
         note.NoteToGraphicalNoteObjectId = this.NoteToGraphicalNoteMapObjectCount;
         this.NoteToGraphicalNoteMap.setValue(note.NoteToGraphicalNoteObjectId, graphicalNote);
+        if (this.noteToGraphicalNoteListSource !== this.NoteToGraphicalNoteMap) {
+            this.noteToGraphicalNoteListSource = this.NoteToGraphicalNoteMap;
+            this.noteToGraphicalNoteList = [];
+        }
+        this.noteToGraphicalNoteList[note.NoteToGraphicalNoteObjectId] = graphicalNote;
         this.NoteToGraphicalNoteMapObjectCount++;
+    }
+
+    /** Same result as NoteToGraphicalNoteMap.getValue(objectId), without the dictionary's string-key lookup. */
+    public getGraphicalNoteByObjectId(objectId: number): GraphicalNote {
+        if (this.noteToGraphicalNoteListSource === this.NoteToGraphicalNoteMap && objectId !== undefined) {
+            const graphicalNote: GraphicalNote = this.noteToGraphicalNoteList[objectId];
+            if (graphicalNote !== undefined) {
+                return graphicalNote;
+            }
+        }
+        return this.NoteToGraphicalNoteMap.getValue(objectId);
     }
 
     /** Returns the GraphicalNote corresponding to (its) note. Also used by Cursor.GNotesUnderCursor().

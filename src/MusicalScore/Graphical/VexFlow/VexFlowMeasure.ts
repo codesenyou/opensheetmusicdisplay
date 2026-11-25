@@ -873,6 +873,9 @@ export class VexFlowMeasure extends GraphicalMeasure {
             }
             return; // don't do the below y position adaptations meant for non-tab notes
         }
+        // Note: this walks every note of each voice present in this measure (voices span the whole score),
+        // so it runs once per measure over the full voice. Keep the loop body cheap.
+        const rules: EngravingRules = this.rules;
         for (const voice of this.getVoicesWithinMeasure()) {
             for (const ve of voice.VoiceEntries) {
                 for (const note of ve.Notes) {
@@ -882,7 +885,9 @@ export class VexFlowMeasure extends GraphicalMeasure {
                         // Doing the below for rests messes up the y-position calculation / bbox for non-rest note for some reason.
                         //   they were not in the voice's voice entries until #1612, so it didn't matter.
                     }
-                    const gNote: VexFlowGraphicalNote = this.rules.GNote(note) as VexFlowGraphicalNote;
+                    // same lookup as rules.GNote(note), minus two call levels
+                    const gNote: VexFlowGraphicalNote =
+                        rules.getGraphicalNoteByObjectId(note.NoteToGraphicalNoteObjectId) as VexFlowGraphicalNote;
                     if (!gNote?.vfnote) { // can happen were invisible, then multi rest measure. TODO fix multi rest measure not removed
                         return;
                     }
@@ -903,12 +908,24 @@ export class VexFlowMeasure extends GraphicalMeasure {
                     } else {
                         relPosY += 0.5; // center-align bbox
                     }
-                    const line: number = -gNote.notehead(vfnote).line; // vexflow y direction is opposite of osmd's
-                    relPosY += line + (gNote.parentVoiceEntry.notes.last() as VexFlowGraphicalNote).notehead().line; // don't move for first note: - (-vexline)
+                    const line: number = -VexFlowMeasure.getNoteheadLine(gNote, vfnote); // vexflow y direction is opposite of osmd's
+                    const lastNote: VexFlowGraphicalNote = gNote.parentVoiceEntry.notes.last() as VexFlowGraphicalNote;
+                    relPosY += line + VexFlowMeasure.getNoteheadLine(lastNote, lastNote.vfnote[0]); // don't move for first note: - (-vexline)
                     gNote.PositionAndShape.RelativePosition.y = relPosY;
                 }
             }
         }
+    }
+
+    /** `gNote.notehead(vfnote).line`, inlined for the hot loop in correctNotePositions().
+     *  `vfnote` must be what notehead() would use: the passed note, else gNote.vfnote[0]. */
+    private static getNoteheadLine(gNote: VexFlowGraphicalNote, vfnote: VF.StemmableNote): number {
+        const noteheads: any = ((vfnote || gNote.vfnote[0]) as any).note_heads;
+        const index: number = gNote.vfnoteIndex;
+        if (noteheads && noteheads.length > index && noteheads[index]) {
+            return noteheads[index].line;
+        }
+        return 0;
     }
 
     /**
@@ -4656,8 +4673,26 @@ export class VexFlowMeasure extends GraphicalMeasure {
         if (!collisionModel) {
             return 0;
         }
+        if (candidateStems.length === 0) {
+            return 0;
+        }
+        // Only boxes near the candidate stems can overlap them. The index returns a superset of those,
+        // in registration order, so the exact checks below see the same overlapping boxes in the same order.
+        let left: number = Number.POSITIVE_INFINITY;
+        let top: number = Number.POSITIVE_INFINITY;
+        let right: number = Number.NEGATIVE_INFINITY;
+        let bottom: number = Number.NEGATIVE_INFINITY;
+        for (const candidate of candidateStems) {
+            left = Math.min(left, candidate.rect.x);
+            top = Math.min(top, candidate.rect.y);
+            right = Math.max(right, candidate.rect.x + candidate.rect.width);
+            bottom = Math.max(bottom, candidate.rect.y + candidate.rect.height);
+        }
+        const nearbyBoxes: CollisionBox[] = collisionModel.queryBoxesOfKinds(
+            "stem-shortening", VexFlowMeasure.stemShorteningCollisionKinds,
+            left / unitInPixels, top / unitInPixels, right / unitInPixels, bottom / unitInPixels);
         let score: number = 0;
-        for (const box of collisionModel.Boxes) {
+        for (const box of nearbyBoxes) {
             const weight: number = this.getStemShorteningCollisionWeight(box.kind);
             if (weight <= 0 || this.collisionBoxBelongsToAny(box, beamNotes)) {
                 continue;
@@ -4676,6 +4711,19 @@ export class VexFlowMeasure extends GraphicalMeasure {
         }
         return score;
     }
+
+    /** every kind for which getStemShorteningCollisionWeight() is positive */
+    private static readonly stemShorteningCollisionKinds: ReadonlySet<CollisionBoxKind> = new Set<CollisionBoxKind>([
+        CollisionBoxKind.Beam,
+        CollisionBoxKind.Rest,
+        CollisionBoxKind.Ornament,
+        CollisionBoxKind.Fingering,
+        CollisionBoxKind.Flag,
+        CollisionBoxKind.Accidental,
+        CollisionBoxKind.Articulation,
+        CollisionBoxKind.Dot,
+        CollisionBoxKind.Tuplet,
+    ]);
 
     private getStemShorteningCollisionWeight(kind: CollisionBoxKind): number {
         switch (kind) {

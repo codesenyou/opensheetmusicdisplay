@@ -75,6 +75,7 @@ import { GraphicalChordSymbolContainer } from "./GraphicalChordSymbolContainer";
 import { LyricsEntry } from "../VoiceData/Lyrics/LyricsEntry";
 import { Voice } from "../VoiceData/Voice";
 import { TabNote } from "../VoiceData/TabNote";
+import { defineLazyDebugGlobal } from "../../Util/LazyDebugGlobal";
 
 interface FingeringCollisionRect {
     left: number;
@@ -149,6 +150,13 @@ type InternalCollisionDebugKind =
     "beam" | "stem" | "note" | "notehead" | "barline" | "existing-fingering" |
     "label-initial" | "label-placed" | "tie" | "ornament" | "articulation" | "ornament-reserve" | "rest";
 
+/** A recorded fingering placement (the exported debug record) plus the staff line position it was recorded with. */
+interface FingeringInternalDebugInput {
+    placement: any;
+    lineX: number;
+    lineY: number;
+}
+
 interface InternalCollisionDebugBox {
     key: string;
     kind: InternalCollisionDebugKind;
@@ -189,8 +197,11 @@ export abstract class MusicSheetCalculator {
     protected musicSystems: MusicSystem[];
 
     private abstractNotImplementedErrorMessage: string = "abstract, not implemented";
-    private fingeringInternalDebugBoxesByKey: Map<string, InternalCollisionDebugBox> =
-        new Map<string, InternalCollisionDebugBox>();
+    /** Fingering placements recorded since the last reset, from which the calculator's
+     *  __osmdInternalCollisionDebug boxes are built on demand. */
+    private fingeringInternalDebugInputs: FingeringInternalDebugInput[] = [];
+    /** Only set while calculateFingerings() runs, see collectFingeringCrossLineTiesByLine(). */
+    private fingeringCrossLineTiesByLine: Map<StaffLine, GraphicalTie[]>;
 
     public static get TextMeasurer(): ITextMeasurer {
         return MusicSheetCalculator.textMeasurer;
@@ -3496,6 +3507,17 @@ export abstract class MusicSheetCalculator {
         };
     }
 
+    /** Same value as getRectOverlapArea(expandFingeringRect(a, padding), expandFingeringRect(b, padding)),
+     *  without allocating the two expanded rects. */
+    private getPaddedRectOverlapArea(a: FingeringCollisionRect, b: FingeringCollisionRect, padding: number): number {
+        const overlapWidth: number = Math.min(a.right + padding, b.right + padding) - Math.max(a.left - padding, b.left - padding);
+        const overlapHeight: number = Math.min(a.bottom + padding, b.bottom + padding) - Math.max(a.top - padding, b.top - padding);
+        if (overlapWidth <= 0 || overlapHeight <= 0) {
+            return 0;
+        }
+        return overlapWidth * overlapHeight;
+    }
+
     private getRectOverlapArea(a: FingeringCollisionRect, b: FingeringCollisionRect): number {
         const overlapWidth: number = Math.min(a.right, b.right) - Math.max(a.left, b.left);
         const overlapHeight: number = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
@@ -4676,6 +4698,13 @@ export abstract class MusicSheetCalculator {
     }
 
     private addFingeringCrossLineTieCollisionRects(rects: FingeringCollisionRect[], line: StaffLine): void {
+        if (this.fingeringCrossLineTiesByLine) {
+            const lineTies: GraphicalTie[] = this.fingeringCrossLineTiesByLine.get(line) ?? [];
+            for (let lineTieIndex: number = 0; lineTieIndex < lineTies.length; lineTieIndex++) {
+                this.addFingeringSplitTieSegmentCollisionRects(rects, lineTies[lineTieIndex], line, lineTieIndex);
+            }
+            return;
+        }
         const seenTies: Set<GraphicalTie> = new Set<GraphicalTie>();
         let tieIndex: number = 0;
         for (const measureColumn of this.graphicalMusicSheet?.MeasureList ?? []) {
@@ -4890,14 +4919,51 @@ export abstract class MusicSheetCalculator {
         return rects;
     }
 
+    /**
+     * The ties that addFingeringCrossLineTieCollisionRects() picks for each staff line (start and end in different
+     * lines, one of them this line), in the same MeasureList scan order. Ties and measures don't change while
+     * fingerings are placed, so calculateFingerings() builds this once instead of rescanning the sheet per label group.
+     */
+    private collectFingeringCrossLineTiesByLine(): Map<StaffLine, GraphicalTie[]> {
+        const tiesByLine: Map<StaffLine, GraphicalTie[]> = new Map<StaffLine, GraphicalTie[]>();
+        const addTie: (line: StaffLine, tie: GraphicalTie) => void = (line: StaffLine, tie: GraphicalTie): void => {
+            let lineTies: GraphicalTie[] = tiesByLine.get(line);
+            if (!lineTies) {
+                lineTies = [];
+                tiesByLine.set(line, lineTies);
+            }
+            lineTies.push(tie);
+        };
+        const seenTies: Set<GraphicalTie> = new Set<GraphicalTie>();
+        for (const measureColumn of this.graphicalMusicSheet?.MeasureList ?? []) {
+            for (const measure of measureColumn ?? []) {
+                for (const staffEntry of measure?.staffEntries ?? []) {
+                    for (const graphicalTie of staffEntry.GraphicalTies ?? []) {
+                        if (seenTies.has(graphicalTie)) {
+                            continue;
+                        }
+                        seenTies.add(graphicalTie);
+                        const startLine: StaffLine =
+                            graphicalTie.StartNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure?.ParentStaffLine;
+                        const endLine: StaffLine =
+                            graphicalTie.EndNote?.parentVoiceEntry?.parentStaffEntry?.parentMeasure?.ParentStaffLine;
+                        if (startLine && endLine && startLine !== endLine) {
+                            addTie(startLine, graphicalTie);
+                            addTie(endLine, graphicalTie);
+                        }
+                    }
+                }
+            }
+        }
+        return tiesByLine;
+    }
+
     private getFingeringBlockingCollisionKinds(rect: FingeringCollisionRect,
                                                collisionRects: FingeringCollisionRect[]): Set<string> {
         const padding: number = 0.08;
-        const labelRect: FingeringCollisionRect = this.expandFingeringRect(rect, padding);
         const kinds: Set<string> = new Set<string>();
         for (const collisionRect of collisionRects) {
-            const obstacleRect: FingeringCollisionRect = this.expandFingeringRect(collisionRect, padding);
-            if (this.getRectOverlapArea(labelRect, obstacleRect) > 0) {
+            if (this.getPaddedRectOverlapArea(rect, collisionRect, padding) > 0) {
                 kinds.add(collisionRect.kind ?? "unknown");
             }
         }
@@ -5150,9 +5216,7 @@ export abstract class MusicSheetCalculator {
         for (const collisionRect of collisionRects) {
             const kind: string = collisionRect.kind ?? "unknown";
             const padding: number = this.getFingeringCollisionClearancePadding(kind);
-            const labelRect: FingeringCollisionRect = this.expandFingeringRect(rect, padding);
-            const obstacleRect: FingeringCollisionRect = this.expandFingeringRect(collisionRect, padding);
-            const paddedOverlap: number = this.getRectOverlapArea(labelRect, obstacleRect);
+            const paddedOverlap: number = this.getPaddedRectOverlapArea(rect, collisionRect, padding);
             if (paddedOverlap <= 0) {
                 continue;
             }
@@ -5422,6 +5486,23 @@ export abstract class MusicSheetCalculator {
         return bestResolution;
     }
 
+    /** A property built by `build` on first read and then kept as a plain writable value. */
+    private defineLazyDebugProperty(target: object, key: string, build: () => unknown): void {
+        const settle: (value: unknown) => void = (value: unknown): void => {
+            Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+        };
+        Object.defineProperty(target, key, {
+            configurable: true,
+            enumerable: true,
+            get: (): unknown => {
+                const value: unknown = build();
+                settle(value);
+                return value;
+            },
+            set: settle
+        });
+    }
+
     private getFingeringDebugScope(): any {
         if (typeof globalThis === "undefined") {
             return undefined;
@@ -5431,7 +5512,8 @@ export abstract class MusicSheetCalculator {
     }
 
     private resetFingeringDebugRecords(): void {
-        this.fingeringInternalDebugBoxesByKey.clear();
+        const inputs: FingeringInternalDebugInput[] = [];
+        this.fingeringInternalDebugInputs = inputs;
         const scope: any = this.getFingeringDebugScope();
         if (!scope) {
             return;
@@ -5442,20 +5524,31 @@ export abstract class MusicSheetCalculator {
             unitInPixels: 10,
             placements: []
         };
-        scope.__osmdInternalCollisionDebug = {
+        // Built on first read only. A normal render replaces it with the drawer's collision model export anyway.
+        defineLazyDebugGlobal(scope, "__osmdInternalCollisionDebug", (): any =>
+            this.buildFingeringInternalCollisionDebugState(generatedAt, inputs));
+    }
+
+    private buildFingeringInternalCollisionDebugState(generatedAt: string, inputs: FingeringInternalDebugInput[]): any {
+        const debugState: any = {
             generatedAt,
             unitInPixels: 10,
             source: "fingering-calculator",
             boxes: []
         };
+        const boxesByKey: Map<string, InternalCollisionDebugBox> = new Map<string, InternalCollisionDebugBox>();
+        for (const input of inputs) {
+            this.recordInternalCollisionDebugBoxes(debugState, boxesByKey, input);
+        }
+        return debugState;
     }
 
-    private getFingeringDebugSvgRect(rect: FingeringCollisionRect, line: StaffLine): FingeringDebugSvgRect {
+
+    private getFingeringDebugSvgRectAt(rect: FingeringCollisionRect, lineX: number, lineY: number): FingeringDebugSvgRect {
         const unitInPixels: number = 10;
-        const lineAbsolutePosition: PointF2D = line.PositionAndShape.AbsolutePosition ?? new PointF2D(0, 0);
         return {
-            x: (lineAbsolutePosition.x + rect.left) * unitInPixels,
-            y: (lineAbsolutePosition.y + rect.top) * unitInPixels,
+            x: (lineX + rect.left) * unitInPixels,
+            y: (lineY + rect.top) * unitInPixels,
             width: (rect.right - rect.left) * unitInPixels,
             height: (rect.bottom - rect.top) * unitInPixels
         };
@@ -5464,11 +5557,18 @@ export abstract class MusicSheetCalculator {
     private toFingeringDebugRect(rect: FingeringCollisionRect, line: StaffLine, index?: number,
                                  initialLabelRect?: FingeringCollisionRect,
                                  placedLabelRect?: FingeringCollisionRect): FingeringDebugRect {
+        const lineAbsolutePosition: PointF2D = line.PositionAndShape.AbsolutePosition ?? new PointF2D(0, 0);
+        return this.toFingeringDebugRectAt(rect, lineAbsolutePosition.x, lineAbsolutePosition.y, index,
+                                           initialLabelRect, placedLabelRect);
+    }
+    private toFingeringDebugRectAt(rect: FingeringCollisionRect, lineX: number, lineY: number, index?: number,
+                                   initialLabelRect?: FingeringCollisionRect,
+                                   placedLabelRect?: FingeringCollisionRect): FingeringDebugRect {
         return {
             ...rect,
             index,
             kind: rect.kind ?? "unknown",
-            svgRect: this.getFingeringDebugSvgRect(rect, line),
+            svgRect: this.getFingeringDebugSvgRectAt(rect, lineX, lineY),
             overlapsInitialLabel: initialLabelRect ? this.getRectOverlapArea(rect, initialLabelRect) > 0 : undefined,
             overlapsPlacedLabel: placedLabelRect ? this.getRectOverlapArea(rect, placedLabelRect) > 0 : undefined
         };
@@ -5525,8 +5625,9 @@ export abstract class MusicSheetCalculator {
         return PlacementEnum[placement] ?? `${placement}`;
     }
 
-    private addInternalCollisionDebugBox(debugState: any, box: InternalCollisionDebugBox): void {
-        const existing: InternalCollisionDebugBox = this.fingeringInternalDebugBoxesByKey.get(box.key);
+    private addInternalCollisionDebugBox(debugState: any, boxesByKey: Map<string, InternalCollisionDebugBox>,
+                                         box: InternalCollisionDebugBox): void {
+        const existing: InternalCollisionDebugBox = boxesByKey.get(box.key);
         if (existing) {
             existing.collision = existing.collision || box.collision;
             if (box.reason) {
@@ -5538,18 +5639,20 @@ export abstract class MusicSheetCalculator {
             return;
         }
 
-        this.fingeringInternalDebugBoxesByKey.set(box.key, box);
+        boxesByKey.set(box.key, box);
         debugState.boxes.push(box);
     }
 
+    /** `placement` is the exported placement record: measure, staffId, measureX, fingering, placement name and
+     *  stackIndex are the values recorded for it, and its rects are copies taken at placement time. */
     private toInternalCollisionDebugBox(rect: FingeringCollisionRect, kind: InternalCollisionDebugKind,
-                                        line: StaffLine, fallbackMeasure: GraphicalMeasure,
-                                        fingering: TechnicalInstruction, placement: PlacementEnum,
-                                        stackIndex: number, initialLabelRect: FingeringCollisionRect,
+                                        input: FingeringInternalDebugInput,
+                                        initialLabelRect: FingeringCollisionRect,
                                         placedLabelRect: FingeringCollisionRect): InternalCollisionDebugBox {
-        const measureNumber: number = rect.debugMeasure ?? fallbackMeasure.MeasureNumber;
-        const staffId: number = rect.debugStaffId ?? line.ParentStaff?.Id ?? 0;
-        const measureX: number = rect.debugMeasureX ?? fallbackMeasure.PositionAndShape.RelativePosition.x;
+        const placement: any = input.placement;
+        const measureNumber: number = rect.debugMeasure ?? placement.measure;
+        const staffId: number = rect.debugStaffId ?? placement.staffId ?? 0;
+        const measureX: number = rect.debugMeasureX ?? placement.measureX;
         const overlapsInitialLabel: boolean = this.getRectOverlapArea(rect, initialLabelRect) > 0;
         const overlapsPlacedLabel: boolean = this.getRectOverlapArea(rect, placedLabelRect) > 0;
         const reason: string = this.getInternalCollisionDebugReason(overlapsInitialLabel, overlapsPlacedLabel);
@@ -5566,31 +5669,32 @@ export abstract class MusicSheetCalculator {
             source: "fingering-calculator",
             collision: overlapsInitialLabel || overlapsPlacedLabel || undefined,
             reason: reason || undefined,
-            fingering: fingering.value,
-            placement: this.getFingeringPlacementDebugName(placement),
-            stackIndex,
-            svgRect: this.getFingeringDebugSvgRect(rect, line)
+            fingering: placement.fingering,
+            placement: placement.placement,
+            stackIndex: placement.stackIndex,
+            svgRect: this.getFingeringDebugSvgRectAt(rect, input.lineX, input.lineY)
         };
     }
 
-    private addInternalLabelDebugBox(debugState: any, kind: "label-initial" | "label-placed",
-                                     rect: FingeringCollisionRect, line: StaffLine, measure: GraphicalMeasure,
-                                     fingering: TechnicalInstruction, placement: PlacementEnum, stackIndex: number,
+    private addInternalLabelDebugBox(debugState: any, boxesByKey: Map<string, InternalCollisionDebugBox>,
+                                     kind: "label-initial" | "label-placed",
+                                     rect: FingeringCollisionRect, input: FingeringInternalDebugInput,
                                      collision: boolean): void {
-        const staffId: number = line.ParentStaff?.Id ?? 0;
+        const placement: any = input.placement;
+        const staffId: number = placement.staffId ?? 0;
         const key: string = this.getInternalCollisionDebugKey(
             kind,
-            measure.MeasureNumber,
+            placement.measure,
             staffId,
             rect,
-            `fingering-label:${fingering.value}:${stackIndex}`
+            `fingering-label:${placement.fingering}:${placement.stackIndex}`
         );
-        this.addInternalCollisionDebugBox(debugState, {
+        this.addInternalCollisionDebugBox(debugState, boxesByKey, {
             key,
             kind,
-            measure: measure.MeasureNumber,
+            measure: placement.measure,
             staffId,
-            measureX: measure.PositionAndShape.RelativePosition.x,
+            measureX: placement.measureX,
             left: rect.left,
             right: rect.right,
             top: rect.top,
@@ -5598,24 +5702,18 @@ export abstract class MusicSheetCalculator {
             source: "fingering-calculator",
             collision: collision || undefined,
             reason: collision ? "label-overlap" : undefined,
-            fingering: fingering.value,
-            placement: this.getFingeringPlacementDebugName(placement),
-            stackIndex,
-            svgRect: this.getFingeringDebugSvgRect(rect, line)
+            fingering: placement.fingering,
+            placement: placement.placement,
+            stackIndex: placement.stackIndex,
+            svgRect: this.getFingeringDebugSvgRectAt(rect, input.lineX, input.lineY)
         });
     }
 
-    private recordInternalCollisionDebugBoxes(fingering: TechnicalInstruction, measure: GraphicalMeasure,
-                                              line: StaffLine, placement: PlacementEnum, stackIndex: number,
-                                              collisionRects: FingeringCollisionRect[],
-                                              initialLabelRect: FingeringCollisionRect,
-                                              placedLabelRect: FingeringCollisionRect): void {
-        const scope: any = this.getFingeringDebugScope();
-        const debugState: any = scope?.__osmdInternalCollisionDebug;
-        if (!debugState?.boxes) {
-            return;
-        }
-
+    private recordInternalCollisionDebugBoxes(debugState: any, boxesByKey: Map<string, InternalCollisionDebugBox>,
+                                              input: FingeringInternalDebugInput): void {
+        const collisionRects: FingeringCollisionRect[] = input.placement.collisionRects;
+        const initialLabelRect: FingeringCollisionRect = input.placement.labelInitial;
+        const placedLabelRect: FingeringCollisionRect = input.placement.labelPlaced;
         let initialLabelCollides: boolean = false;
         let placedLabelCollides: boolean = false;
         for (const rect of collisionRects) {
@@ -5631,14 +5729,11 @@ export abstract class MusicSheetCalculator {
             }
             this.addInternalCollisionDebugBox(
                 debugState,
+                boxesByKey,
                 this.toInternalCollisionDebugBox(
                     rect,
                     kind,
-                    line,
-                    measure,
-                    fingering,
-                    placement,
-                    stackIndex,
+                    input,
                     initialLabelRect,
                     placedLabelRect
                 )
@@ -5648,25 +5743,19 @@ export abstract class MusicSheetCalculator {
         if (initialLabelCollides) {
             this.addInternalLabelDebugBox(
                 debugState,
+                boxesByKey,
                 "label-initial",
                 initialLabelRect,
-                line,
-                measure,
-                fingering,
-                placement,
-                stackIndex,
+                input,
                 true
             );
         }
         this.addInternalLabelDebugBox(
             debugState,
+            boxesByKey,
             "label-placed",
             placedLabelRect,
-            line,
-            measure,
-            fingering,
-            placement,
-            stackIndex,
+            input,
             placedLabelCollides
         );
     }
@@ -5682,6 +5771,9 @@ export abstract class MusicSheetCalculator {
             return;
         }
         const measureNumber: number = measure.MeasureNumber;
+        const lineAbsolutePosition: PointF2D = line.PositionAndShape.AbsolutePosition ?? new PointF2D(0, 0);
+        const lineX: number = lineAbsolutePosition.x;
+        const lineY: number = lineAbsolutePosition.y;
         const record: any = {
             measure: measureNumber,
             measureX: measure.PositionAndShape.RelativePosition.x,
@@ -5692,21 +5784,20 @@ export abstract class MusicSheetCalculator {
             placement: this.getFingeringPlacementDebugName(placement),
             stackIndex,
             labelInitial: this.toFingeringDebugRect(initialLabelRect, line),
-            labelPlaced: this.toFingeringDebugRect(placedLabelRect, line),
-            collisionRects: collisionRects.map((rect: FingeringCollisionRect, index: number) =>
-                this.toFingeringDebugRect(rect, line, index, initialLabelRect, placedLabelRect))
+            labelPlaced: this.toFingeringDebugRect(placedLabelRect, line)
         };
+        // Converting every nearby collision rect for every label cost over a second on long scores, and only the
+        // debug overlay reads them. They are converted on first read, from the same rect objects (built fresh for
+        // this label group and not touched afterwards) and the line position taken now.
+        this.defineLazyDebugProperty(record, "collisionRects", () =>
+            collisionRects.map((rect: FingeringCollisionRect, index: number) =>
+                this.toFingeringDebugRectAt(rect, lineX, lineY, index, initialLabelRect, placedLabelRect)));
         debugState.placements.push(record);
-        this.recordInternalCollisionDebugBoxes(
-            fingering,
-            measure,
-            line,
-            placement,
-            stackIndex,
-            collisionRects,
-            initialLabelRect,
-            placedLabelRect
-        );
+        this.fingeringInternalDebugInputs.push({
+            placement: record,
+            lineX,
+            lineY
+        });
     }
 
     private createFingeringPlacementWorkItem(label: GraphicalLabel, fingering: TechnicalInstruction,
@@ -5858,6 +5949,7 @@ export abstract class MusicSheetCalculator {
                 return;
         }
         this.resetFingeringDebugRecords();
+        this.fingeringCrossLineTiesByLine = this.collectFingeringCrossLineTiesByLine();
         for (const system of this.musicSystems) {
             for (const line of system.StaffLines) {
                 for (const measure of line.Measures) {
@@ -5929,6 +6021,7 @@ export abstract class MusicSheetCalculator {
                 }
             }
         }
+        this.fingeringCrossLineTiesByLine = undefined;
     }
 
     private optimizeRestPlacement(): void {

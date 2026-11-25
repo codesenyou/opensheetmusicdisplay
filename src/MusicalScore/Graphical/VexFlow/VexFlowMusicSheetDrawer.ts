@@ -36,6 +36,109 @@ import { VexFlowGraphicalNote } from "./VexFlowGraphicalNote";
 import { SvgVexFlowBackend } from "./SvgVexFlowBackend";
 import { VexFlowVibratoBracket } from "./VexFlowVibratoBracket";
 import { CollisionBox, CollisionBoxKind, CollisionModel, CollisionRect } from "../CollisionModel";
+import { defineLazyDebugGlobal } from "../../../Util/LazyDebugGlobal";
+
+interface InternalCollisionDebugMeasure {
+    measure: VexFlowMeasure;
+    hasPositionAndShape: boolean;
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    measureNumber: number;
+    staffId: number;
+    relativeX: number;
+}
+
+interface InternalCollisionDebugFingeringLabel {
+    label: GraphicalLabel;
+    measure: InternalCollisionDebugMeasure;
+    rect: CollisionRect;
+    text: string;
+}
+
+/**
+ * Finds the measure a debug collision box belongs to: among the measures whose padded area contains the
+ * box center, the one closest to it (first one wins on ties, in MeasureList order).
+ * A grid over the padded measure areas narrows the candidates; the comparisons are the full original ones.
+ */
+class InternalCollisionDebugMeasureFinder {
+    private static readonly xPadding: number = 8;
+    private static readonly yPadding: number = 6;
+    private static readonly cellSize: number = 16;
+    private static readonly maxCellsPerMeasure: number = 1024;
+
+    private readonly measures: InternalCollisionDebugMeasure[];
+    private readonly cells: Map<string, number[]> = new Map<string, number[]>();
+    /** measures whose padded area is not finite or too large for the grid; checked for every box */
+    private readonly unbucketed: number[] = [];
+
+    constructor(measures: InternalCollisionDebugMeasure[]) {
+        this.measures = measures;
+        const cellSize: number = InternalCollisionDebugMeasureFinder.cellSize;
+        for (let index: number = 0; index < measures.length; index++) {
+            const measure: InternalCollisionDebugMeasure = measures[index];
+            if (!measure.hasPositionAndShape) {
+                continue;
+            }
+            const cx0: number = Math.floor((measure.left - InternalCollisionDebugMeasureFinder.xPadding) / cellSize);
+            const cx1: number = Math.floor((measure.right + InternalCollisionDebugMeasureFinder.xPadding) / cellSize);
+            const cy0: number = Math.floor((measure.top - InternalCollisionDebugMeasureFinder.yPadding) / cellSize);
+            const cy1: number = Math.floor((measure.bottom + InternalCollisionDebugMeasureFinder.yPadding) / cellSize);
+            if (!Number.isFinite(cx0) || !Number.isFinite(cx1) || !Number.isFinite(cy0) || !Number.isFinite(cy1) ||
+                (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > InternalCollisionDebugMeasureFinder.maxCellsPerMeasure) {
+                this.unbucketed.push(index);
+                continue;
+            }
+            for (let cx: number = cx0; cx <= cx1; cx++) {
+                for (let cy: number = cy0; cy <= cy1; cy++) {
+                    const key: string = `${cx},${cy}`;
+                    let cell: number[] = this.cells.get(key);
+                    if (!cell) {
+                        cell = [];
+                        this.cells.set(key, cell);
+                    }
+                    cell.push(index);
+                }
+            }
+        }
+    }
+
+    public find(rect: CollisionRect): InternalCollisionDebugMeasure {
+        const centerX: number = rect.x + rect.width / 2;
+        const centerY: number = rect.y + rect.height / 2;
+        const cellSize: number = InternalCollisionDebugMeasureFinder.cellSize;
+        const cell: number[] = this.cells.get(`${Math.floor(centerX / cellSize)},${Math.floor(centerY / cellSize)}`) ?? [];
+        let candidates: number[] = cell;
+        if (this.unbucketed.length > 0) {
+            candidates = cell.concat(this.unbucketed).sort((a: number, b: number) => a - b);
+        }
+        let bestMeasure: InternalCollisionDebugMeasure;
+        let bestDistance: number = Number.POSITIVE_INFINITY;
+        for (const index of candidates) {
+            const measure: InternalCollisionDebugMeasure = this.measures[index];
+            const measureX: number = measure.left;
+            const measureY: number = measure.top;
+            const measureRight: number = measure.right;
+            const measureBottom: number = measure.bottom;
+            const xPadding: number = InternalCollisionDebugMeasureFinder.xPadding;
+            const yPadding: number = InternalCollisionDebugMeasureFinder.yPadding;
+            if (centerX < measureX - xPadding || centerX > measureRight + xPadding ||
+                centerY < measureY - yPadding || centerY > measureBottom + yPadding) {
+                continue;
+            }
+
+            const clampedX: number = Math.max(measureX, Math.min(centerX, measureRight));
+            const clampedY: number = Math.max(measureY, Math.min(centerY, measureBottom));
+            const distance: number = Math.abs(centerX - clampedX) + Math.abs(centerY - clampedY);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestMeasure = measure;
+            }
+        }
+        return bestMeasure;
+    }
+}
 
 /**
  * This is a global constant which denotes the height in pixels of the space between two lines of the stave
@@ -103,31 +206,50 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         return scope?.document ? scope : undefined;
     }
 
+    /**
+     * Publishes window.__osmdInternalCollisionDebug for the debug overlay tooling.
+     * The render-time inputs (collision boxes, measure geometry, fingering label rects) are captured now;
+     * the box list itself is only built when the global is first read.
+     */
     private exportInternalCollisionDebug(graphicalMusicSheet: GraphicalMusicSheet): void {
         const scope: any = this.getInternalCollisionDebugScope();
         if (!scope) {
             return;
         }
+        const generatedAt: string = new Date().toISOString();
+        const collisionBoxes: CollisionBox[] = graphicalMusicSheet.CollisionModel.Boxes.slice();
+        const measures: InternalCollisionDebugMeasure[] = this.collectInternalCollisionDebugMeasures(graphicalMusicSheet);
+        const fingeringLabels: InternalCollisionDebugFingeringLabel[] = this.collectFingeringLabelDebugInputs(measures);
+        defineLazyDebugGlobal(scope, "__osmdInternalCollisionDebug", (): any =>
+            this.buildInternalCollisionDebugState(generatedAt, collisionBoxes, measures, fingeringLabels));
+    }
 
-        const fingeringLabels: Set<GraphicalLabel> = this.collectFingeringLabels(graphicalMusicSheet);
+    private buildInternalCollisionDebugState(generatedAt: string, collisionBoxes: CollisionBox[],
+                                             measures: InternalCollisionDebugMeasure[],
+                                             fingeringLabelInputs: InternalCollisionDebugFingeringLabel[]): any {
+        const fingeringLabels: Set<GraphicalLabel> = new Set<GraphicalLabel>();
+        for (const input of fingeringLabelInputs) {
+            fingeringLabels.add(input.label);
+        }
+        const measureFinder: InternalCollisionDebugMeasureFinder = new InternalCollisionDebugMeasureFinder(measures);
         const boxes: any[] = [];
         const renderedKeys: Set<string> = new Set<string>();
 
-        for (const collisionBox of graphicalMusicSheet.CollisionModel.Boxes) {
+        for (const collisionBox of collisionBoxes) {
             const kind: string = this.getInternalCollisionDebugKind(collisionBox, fingeringLabels);
             if (!kind || !CollisionModel.isUsableRect(collisionBox.rect)) {
                 continue;
             }
 
-            const measure: VexFlowMeasure = this.findInternalCollisionDebugMeasure(graphicalMusicSheet, collisionBox.rect);
-            const staffId: number = measure?.ParentStaff?.Id ?? 0;
-            const key: string = this.getInternalCollisionDebugKey(collisionBox.id, kind, measure, staffId, collisionBox.rect);
+            const measure: InternalCollisionDebugMeasure = measureFinder.find(collisionBox.rect);
+            const staffId: number = measure?.staffId ?? 0;
+            const key: string = this.getInternalCollisionDebugKey(collisionBox.id, kind, measure?.measureNumber, staffId, collisionBox.rect);
             renderedKeys.add(key);
             if (collisionBox.owner instanceof GraphicalLabel) {
                 renderedKeys.add(this.getInternalCollisionDebugKey(
                     `label:${collisionBox.owner.Label?.text ?? ""}`,
                     kind,
-                    measure,
+                    measure?.measureNumber,
                     staffId,
                     collisionBox.rect
                 ));
@@ -140,9 +262,9 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
                 ownerClass: (collisionBox.owner as any)?.constructor?.name,
                 sourceClass: (collisionBox.source as any)?.constructor?.name,
                 label: collisionBox.label,
-                measure: measure?.MeasureNumber,
+                measure: measure?.measureNumber,
                 staffId,
-                measureX: measure?.PositionAndShape?.RelativePosition?.x,
+                measureX: measure?.relativeX,
                 source: "osmd-collision-model",
                 svgRect: {
                     x: collisionBox.rect.x * unitInPixels,
@@ -152,71 +274,97 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
                 }
             });
         }
-        this.appendFingeringLabelDebugBoxes(graphicalMusicSheet, boxes, renderedKeys);
+        this.appendFingeringLabelDebugBoxes(fingeringLabelInputs, boxes, renderedKeys);
 
-        scope.__osmdInternalCollisionDebug = {
-            generatedAt: new Date().toISOString(),
+        return {
+            generatedAt,
             unitInPixels,
             source: "osmd-collision-model",
             boxes
         };
     }
 
-    private collectFingeringLabels(graphicalMusicSheet: GraphicalMusicSheet): Set<GraphicalLabel> {
-        const labels: Set<GraphicalLabel> = new Set<GraphicalLabel>();
+    /** Geometry of every measure in MeasureList order, as findInternalCollisionDebugMeasure used to read it. */
+    private collectInternalCollisionDebugMeasures(graphicalMusicSheet: GraphicalMusicSheet): InternalCollisionDebugMeasure[] {
+        const measures: InternalCollisionDebugMeasure[] = [];
         for (const measureColumn of graphicalMusicSheet.MeasureList) {
             for (const measure of measureColumn ?? []) {
-                for (const staffEntry of measure?.staffEntries ?? []) {
-                    for (const label of staffEntry.FingeringEntries ?? []) {
-                        labels.add(label);
-                    }
+                const vexFlowMeasure: VexFlowMeasure = measure as VexFlowMeasure;
+                const hasPositionAndShape: boolean = !!vexFlowMeasure?.PositionAndShape;
+                let left: number = Number.NaN;
+                let top: number = Number.NaN;
+                let right: number = Number.NaN;
+                let bottom: number = Number.NaN;
+                if (hasPositionAndShape) {
+                    left = vexFlowMeasure.PositionAndShape.AbsolutePosition.x;
+                    top = vexFlowMeasure.PositionAndShape.AbsolutePosition.y;
+                    right = left + vexFlowMeasure.PositionAndShape.Size.width;
+                    bottom = top + Math.max(vexFlowMeasure.ParentStaff?.StafflineCount - 1, 1);
+                }
+                measures.push({
+                    measure: vexFlowMeasure,
+                    hasPositionAndShape,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    measureNumber: vexFlowMeasure?.MeasureNumber,
+                    staffId: vexFlowMeasure?.ParentStaff?.Id ?? 0,
+                    relativeX: vexFlowMeasure?.PositionAndShape?.RelativePosition?.x
+                });
+            }
+        }
+        return measures;
+    }
+
+    /** Every fingering label (in measure / staff entry order) with its render-time rect. */
+    private collectFingeringLabelDebugInputs(measures: InternalCollisionDebugMeasure[]): InternalCollisionDebugFingeringLabel[] {
+        const labels: InternalCollisionDebugFingeringLabel[] = [];
+        for (const measure of measures) {
+            for (const staffEntry of measure.measure?.staffEntries ?? []) {
+                for (const label of staffEntry.FingeringEntries ?? []) {
+                    labels.push({
+                        label,
+                        measure,
+                        rect: label?.PositionAndShape ? CollisionModel.rectFromBoundingBox(label.PositionAndShape) : undefined,
+                        text: label?.Label?.text
+                    });
                 }
             }
         }
         return labels;
     }
 
-    private appendFingeringLabelDebugBoxes(graphicalMusicSheet: GraphicalMusicSheet, boxes: any[],
+    private appendFingeringLabelDebugBoxes(fingeringLabels: InternalCollisionDebugFingeringLabel[], boxes: any[],
                                            renderedKeys: Set<string>): void {
         const kind: string = "label-placed";
-        for (const measureColumn of graphicalMusicSheet.MeasureList) {
-            for (const measure of measureColumn ?? []) {
-                const vexFlowMeasure: VexFlowMeasure = measure as VexFlowMeasure;
-                const staffId: number = vexFlowMeasure?.ParentStaff?.Id ?? 0;
-                for (const staffEntry of vexFlowMeasure?.staffEntries ?? []) {
-                    for (const label of staffEntry.FingeringEntries ?? []) {
-                        if (!label?.PositionAndShape) {
-                            continue;
-                        }
-                        const rect: CollisionRect = CollisionModel.rectFromBoundingBox(label.PositionAndShape);
-                        if (!CollisionModel.isUsableRect(rect)) {
-                            continue;
-                        }
-
-                        const key: string = this.getInternalCollisionDebugKey(`label:${label.Label?.text ?? ""}`, kind, vexFlowMeasure, staffId, rect);
-                        if (renderedKeys.has(key)) {
-                            continue;
-                        }
-                        renderedKeys.add(key);
-
-                        boxes.push({
-                            key,
-                            kind,
-                            measure: vexFlowMeasure.MeasureNumber,
-                            staffId,
-                            measureX: vexFlowMeasure.PositionAndShape.RelativePosition.x,
-                            source: "osmd-graphical-label",
-                            fingering: label.Label?.text,
-                            svgRect: {
-                                x: rect.x * unitInPixels,
-                                y: rect.y * unitInPixels,
-                                width: rect.width * unitInPixels,
-                                height: rect.height * unitInPixels
-                            }
-                        });
-                    }
-                }
+        for (const input of fingeringLabels) {
+            const rect: CollisionRect = input.rect;
+            if (!rect || !CollisionModel.isUsableRect(rect)) {
+                continue;
             }
+            const measure: InternalCollisionDebugMeasure = input.measure;
+            const key: string = this.getInternalCollisionDebugKey(`label:${input.text ?? ""}`, kind, measure.measureNumber, measure.staffId, rect);
+            if (renderedKeys.has(key)) {
+                continue;
+            }
+            renderedKeys.add(key);
+
+            boxes.push({
+                key,
+                kind,
+                measure: measure.measureNumber,
+                staffId: measure.staffId,
+                measureX: measure.relativeX,
+                source: "osmd-graphical-label",
+                fingering: input.text,
+                svgRect: {
+                    x: rect.x * unitInPixels,
+                    y: rect.y * unitInPixels,
+                    width: rect.width * unitInPixels,
+                    height: rect.height * unitInPixels
+                }
+            });
         }
     }
 
@@ -305,46 +453,11 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         }
     }
 
-    private findInternalCollisionDebugMeasure(graphicalMusicSheet: GraphicalMusicSheet, rect: CollisionRect): VexFlowMeasure {
-        const centerX: number = rect.x + rect.width / 2;
-        const centerY: number = rect.y + rect.height / 2;
-        let bestMeasure: VexFlowMeasure;
-        let bestDistance: number = Number.POSITIVE_INFINITY;
-
-        for (const measureColumn of graphicalMusicSheet.MeasureList) {
-            for (const measure of measureColumn ?? []) {
-                const vexFlowMeasure: VexFlowMeasure = measure as VexFlowMeasure;
-                if (!vexFlowMeasure?.PositionAndShape) {
-                    continue;
-                }
-                const measureX: number = vexFlowMeasure.PositionAndShape.AbsolutePosition.x;
-                const measureY: number = vexFlowMeasure.PositionAndShape.AbsolutePosition.y;
-                const measureRight: number = measureX + vexFlowMeasure.PositionAndShape.Size.width;
-                const measureBottom: number = measureY + Math.max(vexFlowMeasure.ParentStaff?.StafflineCount - 1, 1);
-                const xPadding: number = 8;
-                const yPadding: number = 6;
-                if (centerX < measureX - xPadding || centerX > measureRight + xPadding ||
-                    centerY < measureY - yPadding || centerY > measureBottom + yPadding) {
-                    continue;
-                }
-
-                const clampedX: number = Math.max(measureX, Math.min(centerX, measureRight));
-                const clampedY: number = Math.max(measureY, Math.min(centerY, measureBottom));
-                const distance: number = Math.abs(centerX - clampedX) + Math.abs(centerY - clampedY);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestMeasure = vexFlowMeasure;
-                }
-            }
-        }
-
-        return bestMeasure;
-    }
-
-    private getInternalCollisionDebugKey(id: number | string, kind: string, measure: VexFlowMeasure, staffId: number, rect: CollisionRect): string {
+    private getInternalCollisionDebugKey(id: number | string, kind: string, measureNumber: number, staffId: number,
+                                         rect: CollisionRect): string {
         return [
             id,
-            measure?.MeasureNumber ?? "",
+            measureNumber ?? "",
             staffId,
             kind,
             rect.x.toFixed(2),
